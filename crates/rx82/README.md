@@ -176,7 +176,31 @@ has 256 fixed-size records; 64 subroutine frames and 48 loop frames fit in RAM.
 is executed, rather than the reference interpreter's whole-program precheck.
 `NEXT` detects missing or mismatched active loops. A `GOTO` outside a loop
 discards its frame; subroutines preserve caller loops and discard local loops
-on return. `SAVE`/`LOAD` are the next native milestone.
+on return. `SAVE`/`LOAD` operate at the prompt using quoted host filenames, preserving
+spaces and case. `SAVE` writes sorted numbered text and replaces an existing
+file on close. `LOAD` validates numbering, control bytes, line lengths, and the
+256-nonblank-line limit before replacing program records and clearing variables.
+A failed validation or open leaves the old program and variables intact.
+Statement syntax is checked during execution. Blank lines, CRLF, and a missing
+final newline are accepted. Empty files clear the program. Files are limited
+to 64 KiB by the byte-stream device.
+
+Native and reference BASIC use the same text file format; programs must respect
+the native dialect's resource limits to run on both. For example:
+
+```basic
+LOAD "crates/rx82/examples/countdown.bas"
+RUN
+SAVE "My Countdown.bas"
+```
+
+The native file port does no BASIC parsing: `FF10` accepts commands (1 open for
+read, 2 open for write, 3 close/commit, 4 abort, 5 rewind); `FF11` returns status
+(bit 0 ready, bit 1 EOF, bit 7 error); writes to `FF12` append filename bytes;
+`FF13` transfers data bytes; a write to `FF14` clears the filename. Reads use an
+immutable snapshot so the ROM's validation/install passes see identical bytes.
+Writes accumulate until close. Relative paths use the host working directory.
+The device is attached only to the native BASIC machine, before its ROM.
 
 Memory layout: console at `FF00`–`FF02`, code at `C000`–`FEFF`, reset vector at
 `FFFE`, line buffer at `0200`, little-endian variable words at `0300`–`0333`,
