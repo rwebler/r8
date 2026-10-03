@@ -22,6 +22,11 @@ enum Command {
         /// Paths to the source files.
         paths: Vec<PathBuf>,
     },
+    /// Start BASIC, or run a numbered BASIC source file.
+    Basic {
+        /// BASIC source file to run.
+        path: Option<PathBuf>,
+    },
     /// Disassemble a binary file.
     Dis {
         /// Paths to the binary files.
@@ -71,6 +76,17 @@ enum DocCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Basic { path } => {
+            let mut basic = rx82::basic::Basic::default();
+            let mut input = std::io::stdin().lock();
+            let mut output = std::io::stdout().lock();
+            if let Some(path) = path {
+                basic.load(&fs::read_to_string(path)?)?;
+                basic.run(&mut input, &mut output)
+            } else {
+                basic.interact(&mut input, &mut output)
+            }
+        }
         Command::Asm { paths } => {
             for path in paths {
                 let data = assemble_source_file(&path)?;

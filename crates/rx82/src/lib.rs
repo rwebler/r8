@@ -1,5 +1,6 @@
 #![cfg_attr(doc, doc = include_str!("../README.md"))]
 
+pub mod basic;
 pub mod bus;
 pub mod clock;
 pub mod cpu;

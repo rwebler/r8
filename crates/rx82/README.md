@@ -34,6 +34,59 @@ For example, you could use the R8 CPU as part of your own emulator that replaces
 
 # Usage
 
+## BASIC
+
+Start the Rust-hosted BASIC interpreter:
+
+```sh
+cargo run -p rx82 -- basic
+```
+
+Or run a numbered source file (then exit):
+
+```sh
+cargo run -p rx82 -- basic crates/rx82/examples/squares.bas
+```
+
+With an installed binary, use `rx82 basic [file.bas]`. This interpreter runs on
+the host and does not execute R8 instructions or access emulated memory.
+
+```basic
+10 INPUT N
+20 LET I = 1
+30 PRINT I, I * I
+40 I = I + 1
+50 IF I < N THEN 30
+60 END
+RUN
+```
+
+Enter numbered lines (1–65535) to insert or replace them; enter a bare line
+number to delete it. `LIST` displays the program, `RUN` executes it from the
+lowest line number with cleared variables, and `NEW` clears it. `HELP` shows
+commands; `QUIT` or end of input exits. Unnumbered statements execute immediately.
+Source files contain numbered lines and optional blank lines.
+
+The initial dialect supports:
+
+- `LET name = expression` (the `LET` keyword is optional), and `INPUT name`.
+- `PRINT` or `?` with quoted strings and integer expressions. Semicolons join
+  items; commas insert tabs. A trailing separator suppresses the newline.
+- `IF expression comparison expression THEN line` or `THEN statement`, with
+  `=`, `<>`, `<`, `<=`, `>`, and `>=` comparisons.
+- `GOTO line`, `GOSUB line`, `RETURN`, `END`, `STOP`, and `REM` comments.
+
+Keywords and variable names are case-insensitive; names start with a letter and
+contain letters or digits. Unset variables read as zero. Values are signed
+32-bit integers, with checked arithmetic, `+`, `-`, `*`, `/`, unary signs, and
+parentheses. Division truncates toward zero. Errors in a running program report
+the line number; interactive errors return to the prompt. Ctrl-C terminates the
+process, including an infinite BASIC loop. Subroutine nesting is limited to 256.
+
+This first version has one statement per line, numeric variables, and string
+literals for printing. Arrays, string variables, floating point, `FOR`/`NEXT`,
+and interactive `SAVE`/`LOAD` are not implemented yet.
+
 ## Assembling R8 source files
 
 Prepare your program in a text file (see _R8 Assembly Language_ below), and run:
