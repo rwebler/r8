@@ -1,0 +1,9 @@
+10 REM A 6 by 6 multiplication table using nested loops
+20 PRINT "MULTIPLICATION TABLE: 1 TO 6"
+30 FOR I = 1 TO 6
+40 FOR J = 1 TO 6
+50 PRINT I * J,
+60 NEXT J
+70 PRINT
+80 NEXT I
+90 END

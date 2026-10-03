@@ -143,6 +143,10 @@ This first version has one statement per line, numeric variables, and string
 literals for printing. Arrays, string variables, and floating point are not
 implemented yet.
 
+More runnable programs and a monitor inspection walkthrough are in the
+[BASIC examples guide](examples/README.md), including Fibonacci numbers,
+factorials, a multiplication table, and Euclid's GCD algorithm.
+
 ## Native BASIC ROM
 
 `rx82 basic --native` boots an alternative ROM written in R8 assembly. The Rust
