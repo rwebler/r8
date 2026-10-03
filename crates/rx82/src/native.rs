@@ -13,7 +13,7 @@ use std::io::{BufRead, Write};
 /// Native interpreter assembled from `sys/basic_rom.asm`.
 pub const ROM: &[u8] = include_bytes!("../sys/basic_rom.bin");
 
-/// Creates a machine with the BASIC ROM and console and starts its reset sequence.
+/// Creates a machine paused at the BASIC ROM entry point after CPU reset.
 #[must_use]
 pub fn machine() -> (System, Rc<RefCell<ConsoleState>>) {
     let console = Console::default();
@@ -36,6 +36,11 @@ pub fn machine() -> (System, Rc<RefCell<ConsoleState>>) {
         data: vec![0x00, 0xC0],
     }));
     sys.cpu.reset(&mut sys.bus);
+    // Monitor memory reads are safe at instruction boundaries. Complete the
+    // reset-vector fetch before exposing this machine to the debugger.
+    while sys.cpu.state != crate::state::State::FetchOpcode {
+        sys.tick();
+    }
     (sys, shared)
 }
 
@@ -121,6 +126,25 @@ mod tests {
         let output = String::from_utf8(shared.borrow().output.clone()).unwrap();
         (sys, output)
     }
+    #[test]
+    fn monitor_inspection_preserves_native_startup() {
+        let (sys, shared) = machine();
+        shared.borrow_mut().input.extend(b"10 A=42\nRUN\nQUIT\n");
+        shared.borrow_mut().eof = true;
+        let mut monitor = crate::monitor::Monitor {
+            sys,
+            ..Default::default()
+        };
+        assert_eq!(monitor.sys.cpu.pc, 0xC000);
+        monitor.sys.debug_print();
+        monitor.memory(Some(0x1000));
+        assert_eq!(monitor.sys.cpu.pc, 0xC000);
+        monitor.step(None);
+        monitor.go(None);
+        assert_eq!(monitor.sys.mem.get(0x0300), 42);
+        assert_eq!(monitor.sys.mem.get(0x1000), 10);
+    }
+
     #[test]
     fn rom_matches_source_and_fits() {
         assert_eq!(
