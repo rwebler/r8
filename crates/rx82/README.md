@@ -143,6 +143,39 @@ This first version has one statement per line, numeric variables, and string
 literals for printing. Arrays, string variables, and floating point are not
 implemented yet.
 
+## Native BASIC ROM
+
+`rx82 basic --native` boots an alternative ROM written in R8 assembly. The Rust
+interpreter remains the default/reference. Native parsing, line editing,
+variables, and statement execution happen on the emulated CPU; Rust only
+transports terminal bytes. `rx82 basic --native file.bas` types the file into
+the guest console followed by `RUN` and `QUIT`.
+
+```sh
+cargo run -p rx82 -- basic --native
+cargo run -p rx82 -- basic --native --step program.bas
+```
+
+`--step` opens the machine-code monitor without resetting its PC to user RAM.
+Use `S` to step CPU instructions and `M 1000` / `M 0300` to inspect program
+records / variables. `G` runs until the guest halts; console output is captured
+by the device when using the monitor. There are no source-level breakpoints.
+
+The initial native dialect has `PRINT`, assignment (`LET` optional), `GOTO`,
+`REM`, `END`/`STOP`, `LIST`, `RUN`, `NEW`, and `QUIT`. Variables are single
+letters A–Z, initially zero on `RUN`. At this stage values and line numbers
+are 0–32767 (line zero is reserved). Source lines are limited to 122 bytes,
+and storage has 256 fixed-size records. Invalid input reports `? ERROR` and
+returns to the prompt. Native support will grow separately from the host dialect.
+
+Memory layout: console at `FF00`–`FF02`, code at `C000`–`FEFF`, reset vector at
+`FFFE`, line buffer at `0200`, little-endian variable words at `0300`–`0333`,
+program records at `1000`–`8FFF`, stack below `C000`. Each 128-byte record has
+a little-endian line number followed by NUL-terminated source; zero marks a free
+record. ROM source is `sys/basic_rom.asm`; rebuild its checked-in image with
+`cargo run -p rx82 -- asm crates/rx82/sys/basic_rom.asm`. Tests verify image/source
+agreement, ROM size, output, and guest RAM contents.
+
 ## Assembling R8 source files
 
 Prepare your program in a text file (see _R8 Assembly Language_ below), and run:
