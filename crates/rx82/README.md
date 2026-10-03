@@ -254,6 +254,23 @@ The RX82 is a single-board computer with one R8 CPU clocked at 4Mhz, 64KiB of st
 | 0xFF00 | System I/O area |
 | 0xFFFE | Reset vector |
 
+## Guest console device
+
+The optional `console::Console` device provides byte I/O for native guest
+programs. Attach it before the ROM in `System::devices` so these registers take
+priority over the ROM mapping. Frontends feed its shared input queue and drain
+its output queue; all parsing and computation remain guest instructions.
+
+| Address | Operation |
+| :--- | :--- |
+| `0xFF00` read | Status: bit 0 = input available, bit 1 = host EOF |
+| `0xFF01` read | Consume one input byte (zero if empty) |
+| `0xFF02` write | Emit one output byte |
+
+Guests should check input availability before reading data. EOF may be set
+while queued bytes remain. The existing `PUTCHAR` trap remains available to
+legacy programs. Native console I/O can be tested without a host terminal.
+
 ## Boot process
 
 At power on, the CPU loads the reset vector at 0xFFFE, which in the RX82 system holds the ROM entry point, 0xC000. Execution begins here and a simple RAM test is performed to find the highest writable address in memory. The stack pointer is initialised to this address.

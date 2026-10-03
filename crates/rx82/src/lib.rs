@@ -3,6 +3,7 @@
 pub mod basic;
 pub mod bus;
 pub mod clock;
+pub mod console;
 pub mod cpu;
 pub mod doc;
 pub mod memory;
