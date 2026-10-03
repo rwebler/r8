@@ -161,15 +161,26 @@ Use `S` to step CPU instructions and `M 1000` / `M 0300` to inspect program
 records / variables. `G` runs until the guest halts; console output is captured
 by the device when using the monitor. There are no source-level breakpoints.
 
-The initial native dialect has `PRINT`, assignment (`LET` optional), `GOTO`,
-`REM`, `END`/`STOP`, `LIST`, `RUN`, `NEW`, and `QUIT`. Variables are single
-letters A–Z, initially zero on `RUN`. At this stage values and line numbers
-are 0–32767 (line zero is reserved). Source lines are limited to 122 bytes,
-and storage has 256 fixed-size records. Invalid input reports `? ERROR` and
-returns to the prompt. Native support will grow separately from the host dialect.
+The native dialect supports `PRINT`, assignment (`LET` optional), numeric
+`INPUT`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
+six comparisons with `IF ... THEN`, `GOTO`, `GOSUB`/`RETURN`, `FOR`/`NEXT` with
+`STEP`, `REM`, `END`/`STOP`, `LIST`, `RUN`, `NEW`, and `QUIT`. Bounds, step
+capture, and checked arithmetic follow the reference dialect. Invalid input
+reports an error and returns to the prompt; arithmetic errors identify overflow
+or division by zero and include the current program line.
+
+Native resource limits: variables are single letters A–Z, reset to zero on
+`RUN`; line numbers are 1–65535; source lines are limited to 122 bytes; storage
+has 256 fixed-size records; 64 subroutine frames and 48 loop frames fit in RAM.
+`FOR`/`NEXT` must be standalone statements. Loop matching occurs when the `FOR`
+is executed, rather than the reference interpreter's whole-program precheck.
+`NEXT` detects missing or mismatched active loops. A `GOTO` outside a loop
+discards its frame; subroutines preserve caller loops and discard local loops
+on return. `SAVE`/`LOAD` are the next native milestone.
 
 Memory layout: console at `FF00`–`FF02`, code at `C000`–`FEFF`, reset vector at
 `FFFE`, line buffer at `0200`, little-endian variable words at `0300`–`0333`,
+subroutine frames at `0400`–`04FF`, loop frames at `0500`–`07FF`,
 program records at `1000`–`8FFF`, stack below `C000`. Each 128-byte record has
 a little-endian line number followed by NUL-terminated source; zero marks a free
 record. ROM source is `sys/basic_rom.asm`; rebuild its checked-in image with
