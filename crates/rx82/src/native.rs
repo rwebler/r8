@@ -51,16 +51,24 @@ pub fn interact(
         shared
             .borrow_mut()
             .input
-            .extend(source.bytes().chain(b"\nRUN\nQUIT\n".iter().copied()));
+            .extend(source.bytes().chain(b"\nRUN\n".iter().copied()));
     }
+    let mut ran = false;
     while !sys.cpu.halt {
         sys.tick();
+        ran |= sys.mem.get(0x0082) != 0;
         let bytes = core::mem::take(&mut shared.borrow_mut().output);
         if !bytes.is_empty() {
             output.write_all(&bytes)?;
             output.flush()?;
         }
         if shared.borrow().waiting {
+            if source.is_some() && ran && sys.mem.get(0x0082) == 0 {
+                let mut state = shared.borrow_mut();
+                state.waiting = false;
+                state.input.extend(b"QUIT\n");
+                continue;
+            }
             let mut line = String::new();
             let count = input.read_line(&mut line)?;
             let mut state = shared.borrow_mut();
@@ -85,7 +93,7 @@ pub fn debug(source: &str) -> Result<()> {
     shared
         .borrow_mut()
         .input
-        .extend(source.bytes().chain(b"\nRUN\nQUIT\n".iter().copied()));
+        .extend(source.bytes().chain(b"\nRUN\n".iter().copied()));
     shared.borrow_mut().eof = true;
     let mut monitor = crate::monitor::Monitor {
         sys,
@@ -138,5 +146,78 @@ mod tests {
             session("10 PRINT 1\n20 GOTO 40\n30 PRINT 99\n40 PRINT 3\n10 PRINT 2\n30\nRUN\nQUIT\n");
         assert!(output.contains("2\n3\n"), "{output}");
         assert!(!output.contains("99\n"), "{output}");
+    }
+    #[test]
+    fn native_matches_reference_arithmetic_and_control_flow() {
+        for source in [
+            "10 PRINT -32768,32767,2+3*4,(2+3)*4,-7/2,-3*-4",
+            "10 FOR I=1 TO 2\n20 FOR J=2 TO 1 STEP -1\n30 PRINT I;J\n40 NEXT J\n50 NEXT I",
+            "10 FOR I=2 TO 1\n20 PRINT 99\n30 NEXT I\n40 PRINT 7",
+            "10 A=1\n20 PRINT A*A\n30 A=A+1\n40 IF A<=3 THEN 20\n50 END",
+            "10 FOR I=1 TO 2\n20 GOSUB 100\n30 NEXT I\n40 END\n100 FOR J=1 TO 3\n110 PRINT I;J\n120 RETURN\n130 NEXT J",
+            "10 FOR I=1 TO 2\n20 FOR J=1 TO 2\n30 PRINT I\n40 GOTO 60\n50 NEXT J\n60 NEXT I",
+        ] {
+            let mut reference = crate::basic::Basic::default();
+            reference.load(source).unwrap();
+            let mut expected = Vec::new();
+            reference.run(&mut b"".as_slice(), &mut expected).unwrap();
+            let (_, output) = session(&format!(
+                "{source}\nPRINT \"BEGIN\"\nRUN\nPRINT \"FINISH\"\nQUIT\n"
+            ));
+            let body = output
+                .split("BEGIN\n> ")
+                .nth(1)
+                .unwrap()
+                .split("> FINISH\n")
+                .next()
+                .unwrap();
+            assert_eq!(body.as_bytes(), expected, "{source}\n{output}");
+        }
+    }
+    #[test]
+    fn native_reports_arithmetic_errors_and_recovers() {
+        for expression in ["32767+1", "-32768-1", "200*200", "-32768/-1", "--32768"] {
+            let (_, output) = session(&format!("10 PRINT {expression}\nRUN\nPRINT 7\nQUIT\n"));
+            assert!(output.contains("? INTEGER OVERFLOW IN LINE 10"), "{output}");
+            assert!(output.contains("> 7\n"), "{output}");
+        }
+        let (_, output) = session("10 PRINT 1/0\nRUN\nQUIT\n");
+        assert!(output.contains("? DIVISION BY ZERO IN LINE 10"), "{output}");
+    }
+    #[test]
+    fn native_input_and_full_range_line_numbers() {
+        let (_, output) =
+            session("10 INPUT A\n20 PRINT A\n30 GOTO 65535\n65535 PRINT 7\nRUN\n-32768\nQUIT\n");
+        assert!(output.contains("? -32768\n7\n"), "{output}");
+    }
+    #[test]
+    fn native_loop_errors_return_to_prompt() {
+        for source in [
+            "10 FOR I=1 TO 2 STEP 0\n20 NEXT",
+            "10 FOR I=1 TO 2\n20 NEXT J",
+            "10 NEXT I",
+            "10 FOR I=1 TO 2",
+            "10 FOR I=32767 TO 32767\n20 NEXT I",
+        ] {
+            let (_, output) = session(&format!("{source}\nRUN\nPRINT 7\nQUIT\n"));
+            assert!(
+                output.contains("? ") && output.contains("> 7\n"),
+                "{output}"
+            );
+        }
+    }
+    #[test]
+    fn native_signed_comparisons() {
+        for (comparison, expected) in [
+            ("-2 < 1", true),
+            ("1 > -2", true),
+            ("-2 >= -2", true),
+            ("1 <> 2", true),
+            ("1 = 2", false),
+            ("1 <= -2", false),
+        ] {
+            let (_, output) = session(&format!("10 IF {comparison} THEN PRINT 77\nRUN\nQUIT\n"));
+            assert_eq!(output.contains("77\n"), expected, "{output}");
+        }
     }
 }
