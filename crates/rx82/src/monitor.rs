@@ -84,8 +84,15 @@ impl Monitor {
     ///
     /// If reading the user's command input fails.
     pub fn interact(&mut self) -> Result<()> {
-        self.step = true;
         self.sys.cpu.pc = 0x0100;
+        self.interact_at_current_pc()
+    }
+
+    /// Opens the monitor at the current CPU location, preserving guest execution.
+    /// # Errors
+    /// Returns terminal I/O errors.
+    pub fn interact_at_current_pc(&mut self) -> Result<()> {
+        self.step = true;
         self.last_cmd = Some(Step);
         println!("{BANNER}");
         loop {
