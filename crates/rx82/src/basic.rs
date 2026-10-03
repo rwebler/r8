@@ -392,13 +392,39 @@ impl Basic {
             "HELP" => {
                 writeln!(
                     output,
-                    "Numbered lines edit the program; a bare number deletes a line.\nRUN, LIST, NEW, QUIT\nPRINT, LET, INPUT, IF ... THEN, GOTO, GOSUB, RETURN, REM, END\nIntegers, variables, + - * / and parentheses; comparisons = <> < <= > >="
+                    "Numbered lines edit the program; a bare number deletes a line.\nRUN, LIST, NEW, QUIT\nSAVE \"file.bas\", LOAD \"file.bas\" (prompt only)\nPRINT, LET, INPUT, IF ... THEN, GOTO, GOSUB, RETURN, REM, END\nIntegers, variables, + - * / and parentheses; comparisons = <> < <= > >="
                 )?;
                 return Ok(());
             }
             _ => {}
         }
         let tokens = lex(source)?;
+        if let Some(Token::Word(command)) = tokens.first().cloned()
+            && (command == "SAVE" || command == "LOAD")
+        {
+            #[expect(
+                clippy::pattern_type_mismatch,
+                reason = "borrow the filename from the token slice"
+            )]
+            let [Token::Word(_), Token::Text(path)] = tokens.as_slice() else {
+                bail!("expected {command} \"file.bas\"");
+            };
+            ensure!(!path.is_empty(), "filename must not be empty");
+            if command == "SAVE" {
+                let mut contents = Vec::new();
+                for (number, body) in &self.lines {
+                    writeln!(contents, "{number} {body}")?;
+                }
+                std::fs::write(path, contents).with_context(|| format!("saving {path}"))?;
+            } else {
+                let contents =
+                    std::fs::read_to_string(path).with_context(|| format!("loading {path}"))?;
+                self.load(&contents)
+                    .with_context(|| format!("loading {path}"))?;
+                self.vars.clear();
+            }
+            return Ok(());
+        }
         match self.statement(&tokens, input, output)? {
             Flow::Next | Flow::End => Ok(()),
             _ => bail!("control flow requires RUN"),
@@ -499,5 +525,87 @@ mod tests {
         assert_eq!(output, b"1\n1\n");
         assert!(basic.load("0 END").is_err());
         assert!(basic.load("65536 END").is_err());
+    }
+    #[test]
+    fn files_round_trip_and_failures_preserve_session() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("rx82-basic-{}-{unique}", std::process::id()));
+        #[expect(
+            clippy::create_dir,
+            reason = "fail on collision rather than reuse a test directory"
+        )]
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("My Program.bas");
+        let missing = directory.join("missing.bas");
+        let mut basic = Basic::default();
+        let mut output = Vec::new();
+        let mut input = b"".as_slice();
+        basic.load("20 PRINT A\n10 A=7").unwrap();
+        basic
+            .command(
+                &format!("save \"{}\"", path.display()),
+                &mut input,
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "10 A=7\n20 PRINT A\n"
+        );
+        basic.command("NEW", &mut input, &mut output).unwrap();
+        basic.command("A=99", &mut input, &mut output).unwrap();
+        basic
+            .command(
+                &format!("load \"{}\"", path.display()),
+                &mut input,
+                &mut output,
+            )
+            .unwrap();
+        assert!(basic.vars.is_empty());
+        basic.run(&mut input, &mut output).unwrap();
+        assert_eq!(output, b"7\n");
+        let lines = basic.lines.clone();
+        let vars = basic.vars.clone();
+        std::fs::write(&path, "10 END\nnot numbered").unwrap();
+        for command in [
+            format!("LOAD \"{}\"", path.display()),
+            format!("LOAD \"{}\"", missing.display()),
+            format!("SAVE \"{}\"", directory.display()),
+            "SAVE".to_owned(),
+            "LOAD unquoted.bas".to_owned(),
+            "SAVE \"\"".to_owned(),
+            "LOAD \"x\" extra".to_owned(),
+        ] {
+            assert!(
+                basic.command(&command, &mut input, &mut output).is_err(),
+                "{command}"
+            );
+            assert_eq!(basic.lines, lines);
+            assert_eq!(basic.vars, vars);
+        }
+        // An empty program overwrites the old file and loads as an empty program.
+        basic.command("NEW", &mut input, &mut output).unwrap();
+        basic
+            .command(
+                &format!("SAVE \"{}\"", path.display()),
+                &mut input,
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        basic.load("10 END").unwrap();
+        basic
+            .command(
+                &format!("LOAD \"{}\"", path.display()),
+                &mut input,
+                &mut output,
+            )
+            .unwrap();
+        assert!(basic.lines.is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
