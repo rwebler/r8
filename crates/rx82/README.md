@@ -67,6 +67,26 @@ lowest line number with cleared variables, and `NEW` clears it. `HELP` shows
 commands; `QUIT` or end of input exits. Unnumbered statements execute immediately.
 Source files contain numbered lines and optional blank lines.
 
+Save and reload programs at the prompt:
+
+```basic
+SAVE "squares.bas"
+NEW
+LOAD "squares.bas"
+LIST
+RUN
+```
+
+`SAVE` writes the current program in line-number order as plain text, replacing
+an existing file. `LOAD` replaces the program and clears variables after the file
+has been read successfully and its line numbers validated. An unreadable file or
+invalid line numbering leaves the current program and variables intact. Statement
+syntax is checked when the program runs, as with manually entered lines.
+Both commands require a quoted, nonempty filename; spaces and letter case in
+filenames are preserved. Relative paths use the process's current directory.
+These commands are available at the prompt only. An empty file loads an empty
+program; saving an empty program writes an empty file.
+
 The initial dialect supports:
 
 - `LET name = expression` (the `LET` keyword is optional), and `INPUT name`.
@@ -84,8 +104,8 @@ the line number; interactive errors return to the prompt. Ctrl-C terminates the
 process, including an infinite BASIC loop. Subroutine nesting is limited to 256.
 
 This first version has one statement per line, numeric variables, and string
-literals for printing. Arrays, string variables, floating point, `FOR`/`NEXT`,
-and interactive `SAVE`/`LOAD` are not implemented yet.
+literals for printing. Arrays, string variables, floating point, and `FOR`/`NEXT`
+are not implemented yet.
 
 ## Assembling R8 source files
 
