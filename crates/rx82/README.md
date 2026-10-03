@@ -94,18 +94,54 @@ The initial dialect supports:
   items; commas insert tabs. A trailing separator suppresses the newline.
 - `IF expression comparison expression THEN line` or `THEN statement`, with
   `=`, `<>`, `<`, `<=`, `>`, and `>=` comparisons.
+- `FOR name = start TO limit [STEP step]` and `NEXT [name]` in stored programs.
 - `GOTO line`, `GOSUB line`, `RETURN`, `END`, `STOP`, and `REM` comments.
 
 Keywords and variable names are case-insensitive; names start with a letter and
 contain letters or digits. Unset variables read as zero. Values are signed
-32-bit integers, with checked arithmetic, `+`, `-`, `*`, `/`, unary signs, and
+16-bit integers (-32768 through 32767), with checked arithmetic, `+`, `-`, `*`, `/`, unary signs, and
 parentheses. Division truncates toward zero. Errors in a running program report
 the line number; interactive errors return to the prompt. Ctrl-C terminates the
-process, including an infinite BASIC loop. Subroutine nesting is limited to 256.
+process, including an infinite BASIC loop. Subroutine and active loop nesting
+are each limited to 256. Line numbers retain their unsigned range of 1–65535;
+literal jump targets may use that full range even though numeric expressions
+use signed 16-bit values.
+
+### FOR / NEXT loops
+
+```basic
+10 FOR I = 10 TO 0 STEP -2
+20 PRINT I
+30 NEXT I
+```
+
+This prints 10, 8, 6, 4, 2, and 0 on separate lines. `STEP` defaults to 1 and
+must be nonzero. Start, limit, and step expressions are evaluated once on entry,
+before assigning the start value to the loop variable. Bounds are inclusive.
+If the initial value is already past the limit in the step direction, execution
+skips to the line after the matching `NEXT`; the variable keeps its start value.
+
+Loops may nest with distinct variables. `NEXT` without a name closes the
+innermost loop; a named `NEXT` must match that loop. `FOR` and `NEXT` must be
+standalone numbered statements, not immediate commands or `IF ... THEN`
+statements. `RUN` tokenizes the program and checks loop pairing before executing
+it, including loops in skipped branches. Other syntax is checked as executed.
+
+`NEXT` adds the captured step to the current loop variable, so assignments to
+that variable in the body affect iteration. The variable keeps the first value
+past the limit after normal completion. Every increment uses checked 16-bit
+arithmetic: for example, `FOR I=32767 TO 32767` reports overflow at `NEXT` rather
+than wrapping. The same applies to stepping downward past -32768.
+
+`GOTO` out of a loop discards its active loop state; jumping into a loop does
+not initialize it. Re-entering its `FOR` line starts it again. `GOSUB` preserves
+caller loops, and `RETURN` discards loops started by the subroutine. An already
+active loop variable cannot be reused by another loop. `END`, `STOP`, errors,
+and a fresh `RUN` discard execution's loop state.
 
 This first version has one statement per line, numeric variables, and string
-literals for printing. Arrays, string variables, floating point, and `FOR`/`NEXT`
-are not implemented yet.
+literals for printing. Arrays, string variables, and floating point are not
+implemented yet.
 
 ## Assembling R8 source files
 
