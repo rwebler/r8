@@ -6,6 +6,7 @@ pub mod clock;
 pub mod console;
 pub mod cpu;
 pub mod doc;
+pub mod files;
 pub mod memory;
 pub mod monitor;
 pub mod native;

@@ -24,6 +24,7 @@ pub fn machine() -> (System, Rc<RefCell<ConsoleState>>) {
     };
     sys.devices.clear();
     sys.devices.push(Box::new(console));
+    sys.devices.push(Box::<crate::files::FilePort>::default());
     sys.devices.push(Box::new(Rom {
         start: 0xC000,
         end: 0xFEFF,
@@ -219,5 +220,71 @@ mod tests {
             let (_, output) = session(&format!("10 IF {comparison} THEN PRINT 77\nRUN\nQUIT\n"));
             assert_eq!(output.contains("77\n"), expected, "{output}");
         }
+    }
+    #[test]
+    fn native_files_round_trip_and_failed_loads_preserve_ram() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("r8-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("My Program.bas");
+        let filename = path.to_string_lossy();
+        let (_, output) = session(&format!(
+            "20 PRINT A\n10 A=7\nSAVE \"{filename}\"\nNEW\nLOAD \"{filename}\"\nRUN\nQUIT\n"
+        ));
+        assert!(output.contains("> 7\n"), "{output}");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(saved, "10 A=7\n20 PRINT A\n");
+        let mut reference = crate::basic::Basic::default();
+        reference.load(&saved).unwrap();
+        let mut reference_output = Vec::new();
+        reference
+            .run(&mut b"".as_slice(), &mut reference_output)
+            .unwrap();
+        assert_eq!(reference_output, b"7\n");
+        for malformed in ["10 PRINT 8\nnot numbered", "0 END", "65536 END", "10 \0"] {
+            std::fs::write(&path, malformed).unwrap();
+            let (sys, failure_output) = session(&format!(
+                "10 PRINT 7\nA=42\nLOAD \"{filename}\"\nPRINT A\nRUN\nQUIT\n"
+            ));
+            assert!(
+                failure_output.contains("? ")
+                    && failure_output.contains("> 42\n")
+                    && failure_output.contains("> 7\n"),
+                "{failure_output}"
+            );
+            assert_eq!(sys.mem.get(0x1002), b'P');
+        }
+        let mut too_many_lines = String::new();
+        for line in 1..=257_u16 {
+            use core::fmt::Write as _;
+            writeln!(too_many_lines, "{line} REM").unwrap();
+        }
+        for invalid in [format!("10 REM {}", "x".repeat(200)), too_many_lines] {
+            std::fs::write(&path, invalid).unwrap();
+            let (_, rejected) = session(&format!("10 PRINT 7\nLOAD \"{filename}\"\nRUN\nQUIT\n"));
+            assert!(
+                rejected.contains("? ERROR") && rejected.contains("> 7\n"),
+                "{rejected}"
+            );
+        }
+        std::fs::remove_file(&path).unwrap();
+        let (_, missing_output) = session(&format!("10 PRINT 7\nLOAD \"{filename}\"\nRUN\nQUIT\n"));
+        assert!(
+            missing_output.contains("? FILE ERROR") && missing_output.contains("> 7\n"),
+            "{missing_output}"
+        );
+        std::fs::write(&path, "20 PRINT 2\r\n10 PRINT 1").unwrap();
+        let (_, empty_output) = session(&format!(
+            "LOAD \"{filename}\"\nRUN\nNEW\nSAVE \"{filename}\"\n10 PRINT 9\nLOAD \"{filename}\"\nRUN\nQUIT\n"
+        ));
+        assert!(
+            empty_output.contains("1\n2\n") && !empty_output.contains("9\n"),
+            "{empty_output}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
