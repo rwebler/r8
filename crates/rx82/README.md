@@ -89,6 +89,13 @@ program; saving an empty program writes an empty file.
 
 The initial dialect supports:
 
+- `DIM A(100)` allocates 101 signed 16-bit elements, indexed 0 through 100.
+  Elements start at zero. Use `A(I)` in expressions, assignments, and `INPUT A(I)`.
+  Bounds and indices can be expressions; negative or excessive indices are errors.
+  Declare each array before use; a second `DIM` for the same array is an error.
+  Scalar `A` and array `A(...)` are separate. Arrays are one-dimensional, with
+  one declaration per statement and a shared limit of 2,048 elements.
+  `RUN`, `NEW`, and successful `LOAD` clear arrays; `SAVE` stores source only.
 - `LET name = expression` (the `LET` keyword is optional), and `INPUT name`.
 - `PRINT` or `?` with quoted strings and integer expressions. Semicolons join
   items; commas insert tabs. A trailing separator suppresses the newline.
@@ -140,8 +147,7 @@ active loop variable cannot be reused by another loop. `END`, `STOP`, errors,
 and a fresh `RUN` discard execution's loop state.
 
 This first version has one statement per line, numeric variables, and string
-literals for printing. Arrays, string variables, and floating point are not
-implemented yet.
+literals for printing. String variables and floating point are not implemented yet.
 
 More runnable programs and a monitor inspection walkthrough are in the
 [BASIC examples guide](examples/README.md), including Fibonacci numbers,
@@ -177,7 +183,7 @@ empty `I` sends a blank line. `Q` (or host EOF) exits the monitor; `I QUIT` then
 line numbers; see the monitor commands below.
 
 The native dialect supports `PRINT`, assignment (`LET` optional), numeric
-`INPUT`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
+`INPUT`, one-dimensional arrays declared with `DIM`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
 six comparisons with `IF ... THEN`, `GOTO`, `GOSUB`/`RETURN`, `FOR`/`NEXT` with
 `STEP`, `REM`, `END`/`STOP`, `LIST`, `RUN`, `NEW`, and `QUIT`. Bounds, step
 capture, and checked arithmetic follow the reference dialect. Invalid input
@@ -220,7 +226,12 @@ The device is attached only to the native BASIC machine, before its ROM.
 Memory layout: console at `FF00`–`FF02`, code at `C000`–`FEFF`, reset vector at
 `FFFE`, line buffer at `0200`, little-endian variable words at `0300`–`0333`,
 subroutine frames at `0400`–`04FF`, loop frames at `0500`–`07FF`,
-program records at `1000`–`8FFF`, stack below `C000`. Each 128-byte record has
+array descriptors at `0800`–`0867`, program records at `1000`–`8FFF`,
+array elements at `9000`–`9FFF`, stack at `A000`–`BFFF`.
+Each four-byte array descriptor (A through Z) contains a little-endian base
+address and inclusive upper bound. A zero base means undeclared; elements
+are little-endian signed words. `M 0800` inspects declarations and `M 9000`
+inspects the first allocated array. Each 128-byte record has
 a little-endian line number followed by NUL-terminated source; zero marks a free
 record. ROM source is `sys/basic_rom.asm`; rebuild its checked-in image with
 `cargo run -p rx82 -- asm crates/rx82/sys/basic_rom.asm`. Tests verify image/source
@@ -234,6 +245,10 @@ The line suffix identifies the executing statement, not the missing target.
 
 | Message | Cause / remedy |
 | :--- | :--- |
+| `ARRAY NOT DIMENSIONED` | Declare the array with `DIM` before use. |
+| `ARRAY ALREADY DIMENSIONED` | An array may be declared only once per run. |
+| `SUBSCRIPT OUT OF RANGE` | Use an index from zero through the declared bound. |
+| `ARRAY MEMORY FULL` | All arrays together must fit in 2,048 elements. |
 | `NEXT WITHOUT FOR` | No active loop in this subroutine; enter through its `FOR`. |
 | `NEXT MISMATCH` | The variable or closing statement does not match the active loop. |
 | `FOR WITHOUT NEXT` | The ROM could not find a closing `NEXT`. |

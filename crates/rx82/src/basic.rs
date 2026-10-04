@@ -11,6 +11,7 @@ use std::io::{BufRead, Write};
 /// BASIC program and variable storage. Variables contain signed 16-bit integers.
 #[derive(Default)]
 pub struct Basic {
+    arrays: BTreeMap<String, Vec<i16>>,
     lines: BTreeMap<u16, String>,
     vars: BTreeMap<String, i16>,
 }
@@ -78,6 +79,7 @@ struct Parser<'source> {
     tokens: &'source [Token],
     pos: usize,
     vars: &'source BTreeMap<String, i16>,
+    arrays: &'source BTreeMap<String, Vec<i16>>,
 }
 impl Parser<'_> {
     fn next(&mut self) -> Option<Token> {
@@ -115,13 +117,34 @@ impl Parser<'_> {
         }
         u16::try_from(self.expression()?).context("invalid line number")
     }
+    fn subscript(&mut self, name: &str) -> Result<Option<usize>> {
+        if !self.symbol('(') {
+            return Ok(None);
+        }
+        let index = self.expression()?;
+        ensure!(self.symbol(')'), "expected )");
+        let array = self.arrays.get(name).context("array not dimensioned")?;
+        let index = usize::try_from(index).context("subscript out of range")?;
+        ensure!(index < array.len(), "subscript out of range");
+        Ok(Some(index))
+    }
     fn expression(&mut self) -> Result<i16> {
         self.binary(0)
     }
     fn binary(&mut self, min: u8) -> Result<i16> {
         let mut left = match self.next().context("expected expression")? {
             Token::Number(n) => i16::try_from(n).context("integer out of range")?,
-            Token::Word(name) => self.vars.get(&name).copied().unwrap_or_default(),
+            Token::Word(name) => {
+                if let Some(index) = self.subscript(&name)? {
+                    *self
+                        .arrays
+                        .get(&name)
+                        .and_then(|array| array.get(index))
+                        .context("subscript out of range")?
+                } else {
+                    self.vars.get(&name).copied().unwrap_or_default()
+                }
+            }
             Token::Symbol('-') => {
                 if self.tokens.get(self.pos) == Some(&Token::Number(0x8000)) {
                     self.pos = self.pos.saturating_add(1);
@@ -226,7 +249,8 @@ fn loop_pairs(program: &BTreeMap<u16, Vec<Token>>) -> Result<BTreeMap<u16, u16>>
 }
 
 impl Basic {
-    /// Loads numbered source lines, replacing the program only on success.
+    /// Loads numbered source lines, replacing the program and clearing variables
+    /// and arrays only on success.
     /// # Errors
     /// Returns an error for missing or invalid line numbers.
     pub fn load(&mut self, source: &str) -> Result<()> {
@@ -235,6 +259,8 @@ impl Basic {
             ensure!(program.edit(line)?, "file requires numbered lines");
         }
         self.lines = program.lines;
+        self.vars.clear();
+        self.arrays.clear();
         Ok(())
     }
     fn edit(&mut self, source: &str) -> Result<bool> {
@@ -263,7 +289,31 @@ impl Basic {
             tokens,
             pos: 0,
             vars: &self.vars,
+            arrays: &self.arrays,
         };
+        if parser.word("DIM") {
+            let Some(Token::Word(name)) = parser.next() else {
+                bail!("expected array name");
+            };
+            ensure!(parser.symbol('('), "expected (");
+            let upper = parser.expression()?;
+            ensure!(parser.symbol(')'), "expected )");
+            parser.end()?;
+            let size = usize::try_from(upper)
+                .context("subscript out of range")?
+                .saturating_add(1);
+            ensure!(
+                !self.arrays.contains_key(&name),
+                "array already dimensioned"
+            );
+            let used = self
+                .arrays
+                .values()
+                .fold(0_usize, |total, array| total.saturating_add(array.len()));
+            ensure!(used.saturating_add(size) <= 2048, "array memory full");
+            self.arrays.insert(name, vec![0; size]);
+            return Ok(Flow::Next);
+        }
         if parser.word("REM") {
             return Ok(Flow::Next);
         }
@@ -392,6 +442,7 @@ impl Basic {
         let Some(Token::Word(name)) = parser.next() else {
             bail!("expected statement or variable");
         };
+        let index = parser.subscript(&name)?;
         let value = if read {
             parser.end()?;
             write!(output, "? ")?;
@@ -405,14 +456,23 @@ impl Basic {
             parser.end()?;
             value
         };
-        self.vars.insert(name, value);
+        if let Some(index) = index {
+            *self
+                .arrays
+                .get_mut(&name)
+                .and_then(|array| array.get_mut(index))
+                .context("subscript out of range")? = value;
+        } else {
+            self.vars.insert(name, value);
+        }
         Ok(Flow::Next)
     }
-    /// Runs the stored program, clearing variables first.
+    /// Runs the stored program, clearing scalar variables and arrays first.
     /// # Errors
     /// Reports syntax, arithmetic, input/output, and control-flow errors with line numbers.
     pub fn run(&mut self, input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
         self.vars.clear();
+        self.arrays.clear();
         let program: BTreeMap<u16, Vec<Token>> = self
             .lines
             .iter()
@@ -569,6 +629,7 @@ impl Basic {
             "NEW" => {
                 self.lines.clear();
                 self.vars.clear();
+                self.arrays.clear();
                 return Ok(());
             }
             "LIST" => {
@@ -580,7 +641,7 @@ impl Basic {
             "HELP" => {
                 writeln!(
                     output,
-                    "Numbered lines edit the program; a bare number deletes a line.\nRUN, LIST, NEW, QUIT\nSAVE \"file.bas\", LOAD \"file.bas\" (prompt only)\nPRINT, LET, INPUT, IF ... THEN, GOTO, GOSUB, RETURN, REM, END\nFOR name = start TO limit [STEP step], NEXT [name] (program only)\nSigned 16-bit integers, variables, + - * / and parentheses; comparisons = <> < <= > >="
+                    "Numbered lines edit the program; a bare number deletes a line.\nRUN, LIST, NEW, QUIT\nSAVE \"file.bas\", LOAD \"file.bas\" (prompt only)\nPRINT, LET, INPUT, IF ... THEN, GOTO, GOSUB, RETURN, REM, END\nDIM name(upper): zero-based arrays, 2048 total integer elements\nFOR name = start TO limit [STEP step], NEXT [name] (program only)\nSigned 16-bit integers, variables, + - * / and parentheses; comparisons = <> < <= > >="
                 )?;
                 return Ok(());
             }
@@ -609,7 +670,6 @@ impl Basic {
                     std::fs::read_to_string(path).with_context(|| format!("loading {path}"))?;
                 self.load(&contents)
                     .with_context(|| format!("loading {path}"))?;
-                self.vars.clear();
             }
             return Ok(());
         }
@@ -631,6 +691,58 @@ mod tests {
         let mut output = Vec::new();
         basic.run(&mut input.as_bytes(), &mut output)?;
         Ok(String::from_utf8(output)?)
+    }
+
+    #[test]
+    fn arrays_support_expressions_input_and_separate_scalars() {
+        assert_eq!(execute("10 DIM A(100)\n20 A=7\n30 A(0)=100\n40 INPUT A(A(0))\n50 LET A(1)=A(100)+2\n60 PRINT A,A(2),A(100),A(1)", "-32768\n").unwrap(), "? 7\t0\t-32768\t-32766\n");
+    }
+
+    #[test]
+    fn array_errors_and_capacity() {
+        for (source, cause) in [
+            ("10 PRINT A(0)", "array not dimensioned"),
+            ("10 A(0)=1", "array not dimensioned"),
+            ("10 DIM A(-1)", "subscript out of range"),
+            ("10 DIM A(0)\n20 A(1)=3", "subscript out of range"),
+            ("10 DIM A(0)\n20 PRINT A(-1)", "subscript out of range"),
+            ("10 DIM A(0)\n20 DIM A(2)", "array already dimensioned"),
+            ("10 DIM A(2048)", "array memory full"),
+            ("10 DIM A(2047)\n20 DIM B(0)", "array memory full"),
+            ("10 DIM A", "expected ("),
+            ("10 DIM A(2", "expected )"),
+        ] {
+            assert!(
+                format!("{:#}", execute(source, "").unwrap_err()).contains(cause),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            execute(
+                "10 DIM A(2046)\n20 DIM B(0)\n30 B(0)=42\n40 PRINT A(2046),B(0)",
+                ""
+            )
+            .unwrap(),
+            "0\t42\n"
+        );
+    }
+
+    #[test]
+    fn arrays_reset_on_run_new_and_successful_load() {
+        let mut basic = Basic::default();
+        basic.load("10 DIM A(0)\n20 A(0)=42").unwrap();
+        for _ in 0..2_u8 {
+            basic.run(&mut "".as_bytes(), &mut Vec::new()).unwrap();
+            assert_eq!(basic.arrays.get("A"), Some(&vec![42]));
+        }
+        assert!(basic.load("invalid source").is_err());
+        assert_eq!(basic.arrays.get("A"), Some(&vec![42]));
+        basic.load("10 END").unwrap();
+        assert!(basic.arrays.is_empty());
+        basic
+            .interact(&mut "DIM A(0)\nNEW\nQUIT\n".as_bytes(), &mut Vec::new())
+            .unwrap();
+        assert!(basic.arrays.is_empty());
     }
 
     #[test]

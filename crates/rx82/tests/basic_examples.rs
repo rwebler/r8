@@ -143,3 +143,13 @@ fn gcd_rejects_zero() {
         &[(b'A', 0), (b'B', 5)],
     );
 }
+
+#[test]
+fn sort() {
+    check_example(
+        include_str!("../examples/sort.bas"),
+        "",
+        "1\n2\n3\n5\n7\n9\n",
+        &[(b'I', 6), (b'J', 1), (b'A', 0)],
+    );
+}

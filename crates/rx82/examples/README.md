@@ -14,6 +14,7 @@ otherwise agree.
 | Program | What it exercises | Expected result |
 | :--- | :--- | :--- |
 | [countdown.bas](countdown.bas) | Negative `STEP` | 10, 8, 6, 4, 2, 0, then `Lift off!` |
+| [sort.bas](sort.bas) | `DIM`, indexed assignment, nested loops, `GOSUB` | Sorts six integers into 1, 2, 3, 5, 7, 9 |
 | [squares.bas](squares.bas) | `INPUT`, multiplication, `FOR` | Input 5 produces squares 1, 4, 9, 16, 25 |
 | [fibonacci.bas](fibonacci.bas) | Assignments, addition, loop state | Terms 0 through 15, ending at 610 |
 | [factorials.bas](factorials.bas) | `GOSUB`, nested and zero-trip loops | 0! through 7!: 1, 1, 2, 6, 24, 120, 720, 5040 |
@@ -82,3 +83,14 @@ cargo test -p rx82 --test basic_examples
 These tests run the actual files through both interpreters, check their output
 against expected results, and inspect the native source records and final
 variables in RAM. Interactive examples receive scripted input.
+
+Run the array sorting example with:
+
+```sh
+cargo run -p rx82 -- basic --native crates/rx82/examples/sort.bas
+```
+
+To inspect its storage, add `--break-before-run`, enter `G` to execute,
+then `M 0800` and `M 9000`. Array A's descriptor is `00 90 05 00`
+(base `9000`, inclusive bound 5); its sorted elements are
+`01 00 02 00 03 00 05 00 07 00 09 00`. Scalar A at `0300` remains zero.
