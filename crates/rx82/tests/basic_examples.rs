@@ -153,3 +153,23 @@ fn sort() {
         &[(b'I', 6), (b'J', 1), (b'A', 0)],
     );
 }
+
+#[test]
+fn greeting() {
+    check_example(
+        include_str!("../examples/greeting.bas"),
+        "Ada\n",
+        "What is your name?\n? Hello, Ada!\nGreeting length: 11\nArray elements: 4\nLast square: 9\n",
+        &[(b'I', 4)],
+    );
+}
+
+#[test]
+fn greeting_with_an_empty_name() {
+    check_example(
+        include_str!("../examples/greeting.bas"),
+        "\n",
+        "What is your name?\n? Hello, friend!\nGreeting length: 14\nArray elements: 7\nLast square: 36\n",
+        &[(b'I', 7)],
+    );
+}

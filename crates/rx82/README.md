@@ -97,15 +97,22 @@ The initial dialect supports:
   one declaration per statement and a shared limit of 2,048 elements.
   `RUN`, `NEW`, and successful `LOAD` clear arrays; `SAVE` stores source only.
 - `LET name = expression` (the `LET` keyword is optional), and `INPUT name`.
-- `PRINT` or `?` with quoted strings and integer expressions. Semicolons join
+- String variables such as `A$`, assignment (`A$="hello"`), `INPUT A$`,
+  concatenation (`A$+"!"`), and parenthesized string expressions.
+- `LEN(string)` counts characters; `LEN(array)` counts allocated elements.
+  For `DIM A(100)`, `LEN(A)` is **101**, including element zero. Pass the bare
+  array name, not an indexed element: `LEN(A(0))` is a type error.
+- `PRINT` or `?` with string and integer expressions. Semicolons join
   items; commas insert tabs. A trailing separator suppresses the newline.
 - `IF expression comparison expression THEN line` or `THEN statement`, with
-  `=`, `<>`, `<`, `<=`, `>`, and `>=` comparisons.
+  `=`, `<>`, `<`, `<=`, `>`, and `>=` comparisons. Both operands must be the
+  same type. Strings compare in case-sensitive ASCII order.
 - `FOR name = start TO limit [STEP step]` and `NEXT [name]` in stored programs.
 - `GOTO line`, `GOSUB line`, `RETURN`, `END`, `STOP`, and `REM` comments.
 
 Keywords and variable names are case-insensitive; names start with a letter and
-contain letters or digits. Unset variables read as zero. Values are signed
+contain letters or digits, with a final `$` for strings. Unset numeric variables
+read as zero. Numeric values are signed
 16-bit integers (-32768 through 32767), with checked arithmetic, `+`, `-`, `*`, `/`, unary signs, and
 parentheses. Division truncates toward zero. Errors in a running program report
 the line number; interactive errors return to the prompt. Ctrl-C terminates the
@@ -113,6 +120,36 @@ process, including an infinite BASIC loop. Subroutine and active loop nesting
 are each limited to 256. Line numbers retain their unsigned range of 1–65535;
 literal jump targets may use that full range even though numeric expressions
 use signed 16-bit values.
+
+### Strings and LEN
+
+```basic
+10 INPUT N$
+20 G$="Hello, "+N$+"!"
+30 PRINT G$;" (";LEN(G$);" characters)"
+40 DIM A(10)
+50 FOR I=0 TO LEN(A)-1
+60 A(I)=I*I
+70 NEXT I
+```
+
+String variables end in `$` and default to the empty string. `A`, `A$`, and
+array `A(...)` are independent. Each string value, including literals and
+concatenation results, may contain up to 63 characters: printable ASCII and
+tabs. Case and spaces are preserved. `INPUT A$` reads an unquoted line, preserving
+leading and trailing spaces; an empty line assigns `""`. Quotes in input are
+ordinary characters. Quoted source literals have no escape syntax.
+
+`LEN("")` is zero; `LEN("ab"+"cd")` is four. Its integer result works in
+arithmetic, array indices, `DIM`, and loop bounds. `LEN(A)` requires a declared
+array even when scalar `A` exists. Integers are not implicitly converted to
+strings: use `PRINT "Score: ";N` to print a number alongside text.
+
+`RUN`, `NEW`, and successful `LOAD` clear strings as well as numeric variables
+and arrays. Failed string assignments and failed `LOAD` operations preserve
+existing values. `SAVE` stores source, including string literals, rather than
+runtime values. String arrays are not supported. The native ROM has 26 string
+variables (`A$`–`Z$`); the reference interpreter also permits longer names.
 
 ### FOR / NEXT loops
 
@@ -146,8 +183,8 @@ caller loops, and `RETURN` discards loops started by the subroutine. An already
 active loop variable cannot be reused by another loop. `END`, `STOP`, errors,
 and a fresh `RUN` discard execution's loop state.
 
-This first version has one statement per line, numeric variables, and string
-literals for printing. String variables and floating point are not implemented yet.
+This version has one statement per line, integer variables and arrays, and
+string variables. Floating point and string arrays are not implemented.
 
 More runnable programs and a monitor inspection walkthrough are in the
 [BASIC examples guide](examples/README.md), including Fibonacci numbers,
@@ -182,8 +219,9 @@ empty `I` sends a blank line. `Q` (or host EOF) exits the monitor; `I QUIT` then
 `G` asks the guest to halt. Breakpoints are R8 instruction addresses, not BASIC
 line numbers; see the monitor commands below.
 
-The native dialect supports `PRINT`, assignment (`LET` optional), numeric
-`INPUT`, one-dimensional arrays declared with `DIM`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
+The native dialect supports `PRINT`, assignment (`LET` optional), integer and
+string `INPUT`, string concatenation, `LEN`, one-dimensional integer arrays
+declared with `DIM`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
 six comparisons with `IF ... THEN`, `GOTO`, `GOSUB`/`RETURN`, `FOR`/`NEXT` with
 `STEP`, `REM`, `END`/`STOP`, `LIST`, `RUN`, `NEW`, and `QUIT`. Bounds, step
 capture, and checked arithmetic follow the reference dialect. Invalid input
@@ -226,12 +264,15 @@ The device is attached only to the native BASIC machine, before its ROM.
 Memory layout: console at `FF00`–`FF02`, code at `C000`–`FEFF`, reset vector at
 `FFFE`, line buffer at `0200`, little-endian variable words at `0300`–`0333`,
 subroutine frames at `0400`–`04FF`, loop frames at `0500`–`07FF`,
-array descriptors at `0800`–`0867`, program records at `1000`–`8FFF`,
+array descriptors at `0800`–`0867`, string slots at `0900`–`0F7F`,
+string expression buffers at `0F80`–`0FFF`, program records at `1000`–`8FFF`,
 array elements at `9000`–`9FFF`, stack at `A000`–`BFFF`.
 Each four-byte array descriptor (A through Z) contains a little-endian base
 address and inclusive upper bound. A zero base means undeclared; elements
 are little-endian signed words. `M 0800` inspects declarations and `M 9000`
-inspects the first allocated array. Each 128-byte record has
+inspects the first allocated array. Strings occupy 64-byte slots with a NUL
+terminator: A$ at `0900`, B$ at `0940`, through Z$ at `0F40`. `M 0900`
+shows the first two strings in the dump's ASCII column. Each 128-byte record has
 a little-endian line number followed by NUL-terminated source; zero marks a free
 record. ROM source is `sys/basic_rom.asm`; rebuild its checked-in image with
 `cargo run -p rx82 -- asm crates/rx82/sys/basic_rom.asm`. Tests verify image/source
@@ -249,6 +290,10 @@ The line suffix identifies the executing statement, not the missing target.
 | `ARRAY ALREADY DIMENSIONED` | An array may be declared only once per run. |
 | `SUBSCRIPT OUT OF RANGE` | Use an index from zero through the declared bound. |
 | `ARRAY MEMORY FULL` | All arrays together must fit in 2,048 elements. |
+| `TYPE MISMATCH` | Use matching types; `LEN` accepts strings or bare array names. |
+| `STRING TOO LONG` | A string value exceeds 63 characters. Shorten it before concatenating. |
+| `INVALID STRING CHARACTER` | Use printable ASCII or tabs. |
+| `STRING ARRAYS NOT SUPPORTED` | `DIM` currently declares integer arrays only. |
 | `NEXT WITHOUT FOR` | No active loop in this subroutine; enter through its `FOR`. |
 | `NEXT MISMATCH` | The variable or closing statement does not match the active loop. |
 | `FOR WITHOUT NEXT` | The ROM could not find a closing `NEXT`. |

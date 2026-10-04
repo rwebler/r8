@@ -499,21 +499,35 @@ mod tests {
             .run(&mut b"".as_slice(), &mut reference_output)
             .unwrap();
         assert_eq!(reference_output, b"7\n");
+        let (_, string_output) = session(&format!(
+            "10 A$=\"Saved text\"\n20 PRINT A$\nSAVE \"{filename}\"\nNEW\nLOAD \"{filename}\"\nRUN\nQUIT\n"
+        ));
+        assert!(string_output.contains("> Saved text\n"), "{string_output}");
+        let string_source = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(string_source, "10 A$=\"Saved text\"\n20 PRINT A$\n");
+        reference.load(&string_source).unwrap();
+        reference_output.clear();
+        reference
+            .run(&mut b"".as_slice(), &mut reference_output)
+            .unwrap();
+        assert_eq!(reference_output, b"Saved text\n");
         let (_, loaded) = session(&format!(
-            "DIM A(0)\nA(0)=99\nLOAD \"{filename}\"\nPRINT A(0)\nDIM A(2047)\nPRINT A(2047)\nQUIT\n"
+            "DIM A(0)\nA(0)=99\nA$=\"old\"\nLOAD \"{filename}\"\nPRINT LEN(A$)\nPRINT A(0)\nDIM A(2047)\nPRINT A(2047)\nQUIT\n"
         ));
         assert!(loaded.contains("ARRAY NOT DIMENSIONED"), "{loaded}");
         assert!(loaded.contains("> 0\n"), "{loaded}");
+        assert_eq!(loaded.matches("> 0\n").count(), 2, "{loaded}");
         assert!(!loaded.contains("ARRAY MEMORY FULL"), "{loaded}");
         for malformed in ["10 PRINT 8\nnot numbered", "0 END", "65536 END", "10 \0"] {
             std::fs::write(&path, malformed).unwrap();
             let (sys, failure_output) = session(&format!(
-                "10 PRINT 7\nA=42\nDIM B(0)\nB(0)=99\nLOAD \"{filename}\"\nPRINT A\nPRINT B(0)\nRUN\nQUIT\n"
+                "10 PRINT 7\nA=42\nDIM B(0)\nB(0)=99\nA$=\"kept\"\nLOAD \"{filename}\"\nPRINT A\nPRINT B(0)\nPRINT A$\nRUN\nQUIT\n"
             ));
             assert!(
                 failure_output.contains("? ")
                     && failure_output.contains("> 42\n")
                     && failure_output.contains("> 99\n")
+                    && failure_output.contains("> kept\n")
                     && failure_output.contains("> 7\n"),
                 "{failure_output}"
             );
