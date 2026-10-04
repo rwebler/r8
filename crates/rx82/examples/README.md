@@ -32,25 +32,27 @@ printf '252\n105\n' | cargo run -p rx82 -- basic --native crates/rx82/examples/g
 
 ## Inspect native execution
 
-Start a noninteractive example in the machine-code monitor:
+Load an example and pause before its BASIC statements execute:
 
 ```sh
-cargo run -p rx82 -- basic --native --step crates/rx82/examples/factorials.bas
+cargo run -p rx82 -- basic --native --break-before-run crates/rx82/examples/factorials.bas
 ```
 
 At the monitor prompt:
 
 ```text
+m 1000
+m 0300
 g
 m 0300
-m 1000
 m 1380
 q
 ```
 
-`g` boots the ROM, loads the queued program and executes it, then halts at input
-EOF. `m` displays 128 bytes starting at the hexadecimal address. For factorials,
-these dumps show:
+Before `g`, the source is already in RAM and variables are still zero. `g`
+executes the queued `RUN`, displays the program output, then returns to the
+monitor when BASIC prompts for another command. `m` displays 128 bytes as hex
+and ASCII. For factorials, the dumps after execution show:
 
 - Variable F at `030A`: `B0 13`, little-endian `0x13B0` = **5040**.
 - Variables I at `0310` and N at `031A`: `08 00`, both **8** after their loops.
@@ -61,11 +63,15 @@ With Fibonacci instead, variable A at `0300` ends as `DB 03` (**987**), B and C
 as `3D 06` (**1597**), and I at `0310` as `10 00` (**16**). The last *printed*
 term is 610; assignments advance the state once more before the loop exits.
 
-Use `s` before `g` to single-step R8 instructions. The initial PC is `C000`, in
-the ROM. Program source lives in RAM starting at `1000`, in 128-byte records;
-variables are little-endian words starting at `0300`. Monitor mode captures
-console output instead of displaying it, and does not supply additional input
-to `INPUT`; use the examples without `INPUT` for this walkthrough.
+Use `--step` instead of `--break-before-run` to stop at ROM entry (`C000`).
+Then `B C000`, `G`, and `S` demonstrate stopping before an instruction and
+stepping over it. `B` lists breakpoints, `BC C000` removes one, and `BC` clears
+all. Breakpoints use hexadecimal machine-code addresses, not BASIC line numbers.
+
+Guest output is displayed in monitor mode. For an input-driven example such as
+`squares.bas`, use `G` to reach `INPUT`, `I 5` to queue an answer, then `G` to
+continue. At BASIC's final prompt, `I LIST` then `G` lists its program without
+leaving the monitor. `Q` exits; `I QUIT` followed by `G` halts the guest.
 
 ## Repeatable checks
 

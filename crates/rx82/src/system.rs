@@ -99,10 +99,14 @@ impl Default for System {
 impl System {
     /// Prints the current CPU state and the next instruction in memory.
     pub fn debug_print(&mut self) {
+        println!("{}", self.debug_state());
+    }
+
+    /// Formats CPU registers and the next instruction for a debugger frontend.
+    pub fn debug_state(&mut self) -> String {
         let next = self.disassemble_next();
-        println!("  PC   SP  A  B  C  D  E  F  G  H ZC | NEXT");
-        println!(
-            "{:04X} {:04X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:1b}{:1b} | {}",
+        format!(
+            "  PC   SP  A  B  C  D  E  F  G  H ZC | NEXT\n{:04X} {:04X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:1b}{:1b} | {}",
             self.cpu.pc,
             self.cpu.regs.get16(SP),
             self.cpu.regs.get(A),
@@ -116,7 +120,7 @@ impl System {
             u8::from(self.cpu.flags.zero),
             u8::from(self.cpu.flags.carry),
             next,
-        );
+        )
     }
 
     /// Returns the disassembly of the instruction at PC.

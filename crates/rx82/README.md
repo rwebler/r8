@@ -158,12 +158,23 @@ the guest console followed by `RUN` and `QUIT`.
 ```sh
 cargo run -p rx82 -- basic --native
 cargo run -p rx82 -- basic --native --step program.bas
+cargo run -p rx82 -- basic --native --break-before-run program.bas
 ```
 
-`--step` opens the machine-code monitor without resetting its PC to user RAM.
-Use `S` to step CPU instructions and `M 1000` / `M 0300` to inspect program
-records / variables. `G` runs until the guest halts; console output is captured
-by the device when using the monitor. There are no source-level breakpoints.
+`--step` opens the monitor at ROM entry (`C000`), before the source is loaded.
+`--break-before-run` first lets the ROM consume the numbered source file, then
+opens the monitor with records loaded and `RUN` queued but not executed. Use
+`M 1000` to inspect source, `M 0300` to inspect variables, and `G` to continue.
+The preload mode rejects unnumbered commands and reports ROM loading errors;
+it has a 20-million-cycle loading limit.
+
+Guest console output is displayed during stepping and continuous execution.
+When the guest needs keyboard input, execution returns to the monitor at an
+instruction boundary. Use `I 5` followed by `G` to answer a numeric `INPUT`, or
+`I LIST` / `I RUN` followed by `G` to issue a BASIC command at its prompt. An
+empty `I` sends a blank line. `Q` (or host EOF) exits the monitor; `I QUIT` then
+`G` asks the guest to halt. Breakpoints are R8 instruction addresses, not BASIC
+line numbers; see the monitor commands below.
 
 The native dialect supports `PRINT`, assignment (`LET` optional), numeric
 `INPUT`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
@@ -255,49 +266,57 @@ rx82 mon --step my_prog.bin
 
 ## Using the monitor
 
-The monitor displays the current CPU registers and the next instruction in memory, then prompts for a command. Type `H` for help:
+The monitor displays CPU registers and the next instruction before each command.
+Addresses are hexadecimal (with an optional `0x` prefix).
 
-```txt
-RMON v1.0 (C) 1977 Solid State Technologies, Inc.
-  PC   SP  A  B  C  D  E  F  G  H ZC | NEXT
-C022 BFFF 02 00 BF FF 00 00 00 00 00 | halt
-> h
-Commands:
-G [<address>] = Go (run till halted)
-H             = Help
-M [<address>] = Memory dump
-S [<address>] = Single step
-Q             = Quit
-Enter         = Repeat last command
->
+| Command | Action |
+| :--- | :--- |
+| `B address` | Add an instruction breakpoint |
+| `B` | List breakpoints |
+| `BC address` | Remove a breakpoint |
+| `BC` | Clear all breakpoints |
+| `G [address]` | Run until a breakpoint, HALT, or guest input request |
+| `S [address]` | Execute one instruction |
+| `M [address]` | Dump 128 bytes as hex and ASCII |
+| `I [text]` | Queue a guest input line, preserving case and spaces |
+| `H` | Show help |
+| `Q` | Quit |
+| Enter | Repeat the last `G`, `M`, or `S`, without its address |
+
+Breakpoints stop **before** the instruction executes. After hitting one, `G`
+continues past that instruction once and leaves the breakpoint armed for the
+next visit. `S` executes the current instruction even if it has a breakpoint.
+Breakpoints persist for the monitor session. A pending store is committed before
+control returns to the monitor, so memory and console inspection see its result.
+
+For example, start native BASIC with `--step`, then use:
+
+```text
+B C000
+G
+S
+BC C000
+G
 ```
 
-To dump memory, use the `M` command. This will print a block of memory starting at the current value of `pc`:
+`G` first stops at ROM entry. `S` executes the stack initialization instruction.
+The final `G` loads and runs the queued program, displaying its output. A guest
+input request returns control with an explanation; use `I text` then `G` to
+continue. Input/output transport is available when a guest console is attached,
+as it is for native BASIC.
 
-```txt
-> m
-0000: 10 06 19 FF FF 49 B2 FD 40 B2 F7 00 00 00 00 00
-0010: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Memory dumps include an ASCII column; nonprintable bytes appear as dots:
+
+```text
+> M 1080
+1080: 14 00 46 4F 52 20 49 20 3D 20 31 30 20 54 4F 20  |..FOR I = 10 TO |
+1090: 30 20 53 54 45 50 20 2D 32 00 00 00 00 00 00 00  |0 STEP -2.......|
 ...
 ```
 
-Press Enter to dump the next block:
-
-```txt
->
-0080: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-0090: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-...
-```
-
-To dump memory from a specific address, enter the address in hex:
-
-```txt
-> m fff0
-FFF0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 C0
-0000: 10 06 19 FF FF 49 B2 FD 40 B2 F7 00 00 00 00 00
-...
-```
+Enter (or `M` without an address) continues at the next 128-byte block. Dumps
+wrap from `FFFF` to `0000`. Memory-mapped I/O reads can have device side effects;
+use the RAM and ROM ranges when inspecting code, source, and variables.
 
 ## Disassembling R8 binary files
 
