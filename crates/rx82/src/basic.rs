@@ -1,4 +1,4 @@
-//! A small, host-side integer BASIC interpreter.
+//! A small, host-side BASIC interpreter with integers and strings.
 #![allow(
     clippy::arbitrary_source_item_ordering,
     reason = "keep parsing and execution helpers in reading order"
@@ -8,10 +8,11 @@ use alloc::collections::BTreeMap;
 use anyhow::{Context as _, Result, bail, ensure};
 use std::io::{BufRead, Write};
 
-/// BASIC program and variable storage. Variables contain signed 16-bit integers.
+/// BASIC program storage, signed 16-bit integers, arrays, and ASCII strings.
 #[derive(Default)]
 pub struct Basic {
     arrays: BTreeMap<String, Vec<i16>>,
+    strings: BTreeMap<String, String>,
     lines: BTreeMap<u16, String>,
     vars: BTreeMap<String, i16>,
 }
@@ -58,6 +59,10 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                     value.push(next);
                 }
             }
+            if chars.peek() == Some(&'$') {
+                chars.next();
+                value.push('$');
+            }
             let word = value.to_ascii_uppercase();
             let remark = word == "REM";
             tokens.push(Token::Word(word));
@@ -80,8 +85,72 @@ struct Parser<'source> {
     pos: usize,
     vars: &'source BTreeMap<String, i16>,
     arrays: &'source BTreeMap<String, Vec<i16>>,
+    strings: &'source BTreeMap<String, String>,
 }
+
+fn check_string(value: &str) -> Result<()> {
+    ensure!(value.len() <= 63, "string too long");
+    ensure!(
+        value
+            .bytes()
+            .all(|byte| byte == b'\t' || (b' '..=b'~').contains(&byte)),
+        "invalid string character"
+    );
+    Ok(())
+}
+
 impl Parser<'_> {
+    fn is_string(&self) -> bool {
+        let first = self
+            .tokens
+            .iter()
+            .skip(self.pos)
+            .find(|token| **token != Token::Symbol('('));
+        matches!(first, Some(Token::Text(_)))
+            || matches!(first, Some(Token::Word(name)) if name.ends_with('$'))
+    }
+    fn string_expression(&mut self) -> Result<String> {
+        let mut value = String::new();
+        loop {
+            let part = match self.next() {
+                Some(Token::Text(text)) => text,
+                Some(Token::Word(name)) if name.ends_with('$') => {
+                    self.strings.get(&name).cloned().unwrap_or_default()
+                }
+                Some(Token::Symbol('(')) => {
+                    let text = self.string_expression()?;
+                    ensure!(self.symbol(')'), "expected )");
+                    text
+                }
+                _ => bail!("type mismatch"),
+            };
+            value.push_str(&part);
+            check_string(&value)?;
+            if !self.symbol('+') {
+                return Ok(value);
+            }
+        }
+    }
+    fn length(&mut self) -> Result<i16> {
+        ensure!(self.symbol('('), "expected (");
+        let size = if self.is_string() {
+            self.string_expression()?.len()
+        } else {
+            let Some(Token::Word(name)) = self.next() else {
+                bail!("type mismatch");
+            };
+            ensure!(
+                self.tokens.get(self.pos) == Some(&Token::Symbol(')')),
+                "type mismatch"
+            );
+            self.arrays
+                .get(&name)
+                .context("array not dimensioned")?
+                .len()
+        };
+        ensure!(self.symbol(')'), "expected )");
+        i16::try_from(size).context("integer overflow")
+    }
     fn next(&mut self) -> Option<Token> {
         let token = self.tokens.get(self.pos).cloned();
         self.pos = self.pos.saturating_add(1);
@@ -134,7 +203,9 @@ impl Parser<'_> {
     fn binary(&mut self, min: u8) -> Result<i16> {
         let mut left = match self.next().context("expected expression")? {
             Token::Number(n) => i16::try_from(n).context("integer out of range")?,
+            Token::Word(name) if name == "LEN" => self.length()?,
             Token::Word(name) => {
+                ensure!(!name.ends_with('$'), "type mismatch");
                 if let Some(index) = self.subscript(&name)? {
                     *self
                         .arrays
@@ -159,7 +230,8 @@ impl Parser<'_> {
                 ensure!(self.symbol(')'), "expected )");
                 value
             }
-            _ => bail!("expected expression"),
+            Token::Text(_) => bail!("type mismatch"),
+            Token::Symbol(_) => bail!("expected expression"),
         };
         while let Some(Token::Symbol(op)) = self.tokens.get(self.pos).cloned() {
             let precedence = match op {
@@ -250,7 +322,7 @@ fn loop_pairs(program: &BTreeMap<u16, Vec<Token>>) -> Result<BTreeMap<u16, u16>>
 
 impl Basic {
     /// Loads numbered source lines, replacing the program and clearing variables
-    /// and arrays only on success.
+    /// and arrays only on success, including string variables.
     /// # Errors
     /// Returns an error for missing or invalid line numbers.
     pub fn load(&mut self, source: &str) -> Result<()> {
@@ -261,6 +333,7 @@ impl Basic {
         self.lines = program.lines;
         self.vars.clear();
         self.arrays.clear();
+        self.strings.clear();
         Ok(())
     }
     fn edit(&mut self, source: &str) -> Result<bool> {
@@ -290,11 +363,13 @@ impl Basic {
             pos: 0,
             vars: &self.vars,
             arrays: &self.arrays,
+            strings: &self.strings,
         };
         if parser.word("DIM") {
             let Some(Token::Word(name)) = parser.next() else {
                 bail!("expected array name");
             };
+            ensure!(!name.ends_with('$'), "string arrays not supported");
             ensure!(parser.symbol('('), "expected (");
             let upper = parser.expression()?;
             ensure!(parser.symbol(')'), "expected )");
@@ -321,6 +396,7 @@ impl Basic {
             let Some(Token::Word(name)) = parser.next() else {
                 bail!("expected FOR variable");
             };
+            ensure!(!name.ends_with('$'), "type mismatch");
             ensure!(parser.symbol('='), "expected =");
             let start = parser.expression()?;
             ensure!(parser.word("TO"), "expected TO");
@@ -350,22 +426,35 @@ impl Basic {
             return Ok(Flow::NextLoop);
         }
         if parser.word("IF") {
-            let left = parser.expression()?;
+            let text = if parser.is_string() {
+                Some(parser.string_expression()?)
+            } else {
+                None
+            };
+            let left = if text.is_none() {
+                parser.expression()?
+            } else {
+                0
+            };
             let Some(Token::Symbol(op @ ('=' | '<' | '>'))) = parser.next() else {
                 bail!("expected comparison");
             };
             let equal = parser.symbol('=');
             let unequal = op == '<' && !equal && parser.symbol('>');
             ensure!(op != '=' || !equal, "use = for equality");
-            let right = parser.expression()?;
+            let ordering = if let Some(text) = text {
+                text.cmp(&parser.string_expression()?)
+            } else {
+                left.cmp(&parser.expression()?)
+            };
             ensure!(parser.word("THEN"), "expected THEN");
             let condition = match op {
-                '=' => left == right,
-                '<' if unequal => left != right,
-                '<' if equal => left <= right,
-                '<' => left < right,
-                '>' if equal => left >= right,
-                _ => left > right,
+                '=' => ordering.is_eq(),
+                '<' if unequal => !ordering.is_eq(),
+                '<' if equal => !ordering.is_gt(),
+                '<' => ordering.is_lt(),
+                '>' if equal => !ordering.is_lt(),
+                _ => ordering.is_gt(),
             };
             let rest = tokens
                 .get(parser.pos..)
@@ -388,13 +477,8 @@ impl Basic {
         if parser.word("PRINT") || parser.symbol('?') {
             let mut newline = true;
             while parser.pos < tokens.len() {
-                #[expect(
-                    clippy::pattern_type_mismatch,
-                    reason = "borrow string without cloning"
-                )]
-                if let Some(Token::Text(text)) = tokens.get(parser.pos) {
-                    write!(output, "{text}")?;
-                    parser.pos = parser.pos.saturating_add(1);
+                if parser.is_string() {
+                    write!(output, "{}", parser.string_expression()?)?;
                 } else {
                     write!(output, "{}", parser.expression()?)?;
                 }
@@ -442,6 +526,30 @@ impl Basic {
         let Some(Token::Word(name)) = parser.next() else {
             bail!("expected statement or variable");
         };
+        if name.ends_with('$') {
+            let value = if read {
+                parser.end()?;
+                write!(output, "? ")?;
+                output.flush()?;
+                let mut line = String::new();
+                ensure!(input.read_line(&mut line)? != 0, "end of input");
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                }
+                check_string(&line)?;
+                line
+            } else {
+                ensure!(parser.symbol('='), "expected =");
+                let text = parser.string_expression()?;
+                parser.end()?;
+                text
+            };
+            self.strings.insert(name, value);
+            return Ok(Flow::Next);
+        }
         let index = parser.subscript(&name)?;
         let value = if read {
             parser.end()?;
@@ -467,12 +575,13 @@ impl Basic {
         }
         Ok(Flow::Next)
     }
-    /// Runs the stored program, clearing scalar variables and arrays first.
+    /// Runs the stored program, clearing integers, strings, and arrays first.
     /// # Errors
     /// Reports syntax, arithmetic, input/output, and control-flow errors with line numbers.
     pub fn run(&mut self, input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
         self.vars.clear();
         self.arrays.clear();
+        self.strings.clear();
         let program: BTreeMap<u16, Vec<Token>> = self
             .lines
             .iter()
@@ -630,6 +739,7 @@ impl Basic {
                 self.lines.clear();
                 self.vars.clear();
                 self.arrays.clear();
+                self.strings.clear();
                 return Ok(());
             }
             "LIST" => {
@@ -642,6 +752,10 @@ impl Basic {
                 writeln!(
                     output,
                     "Numbered lines edit the program; a bare number deletes a line.\nRUN, LIST, NEW, QUIT\nSAVE \"file.bas\", LOAD \"file.bas\" (prompt only)\nPRINT, LET, INPUT, IF ... THEN, GOTO, GOSUB, RETURN, REM, END\nDIM name(upper): zero-based arrays, 2048 total integer elements\nFOR name = start TO limit [STEP step], NEXT [name] (program only)\nSigned 16-bit integers, variables, + - * / and parentheses; comparisons = <> < <= > >="
+                )?;
+                writeln!(
+                    output,
+                    "Strings: name$, 63 ASCII characters, + joins strings; LEN(name$) or LEN(array)"
                 )?;
                 return Ok(());
             }
@@ -743,6 +857,18 @@ mod tests {
             .interact(&mut "DIM A(0)\nNEW\nQUIT\n".as_bytes(), &mut Vec::new())
             .unwrap();
         assert!(basic.arrays.is_empty());
+    }
+
+    #[test]
+    fn strings_reset_only_after_a_successful_load() {
+        let mut basic = Basic::default();
+        basic
+            .command("A$=\"kept\"", &mut "".as_bytes(), &mut Vec::new())
+            .unwrap();
+        assert!(basic.load("invalid source").is_err());
+        assert_eq!(basic.strings.get("A$").map(String::as_str), Some("kept"));
+        basic.load("10 END").unwrap();
+        assert!(basic.strings.is_empty());
     }
 
     #[test]

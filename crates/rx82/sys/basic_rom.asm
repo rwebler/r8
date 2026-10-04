@@ -5,6 +5,8 @@
 ; 00A6..AC file transfer state (LOAD validates before replacing the program).
 ; RAM: 0080 current line, 0082 running, 0084 next line pointer.
 ; 0200 input buffer (128 bytes), 0300 variables (26 little-endian words).
+; 0800 array descriptors; 0900..0FFF strings and expression buffers.
+; 9000..9FFF integer array elements; 00B0 array allocation pointer.
 ; 1000..8FFF: 256 records of 128 bytes: line word, NUL-terminated text.
 ; A zero line number marks a free record. Stack grows down from BFFF.
     org 0xC000
@@ -413,6 +415,10 @@ GOTO_STORE:
     ld 0x0081, a
     ret
 ASSIGN:
+    call IS_STRING
+    beq ASSIGN_INTEGER
+    jmp ASSIGN_STRING
+ASSIGN_INTEGER:
     call LOCATION
     push cd
     call SPACE
@@ -436,24 +442,12 @@ PRINT:
     jmp NEWLINE
 LONG_334:
 PRINT_ITEM:
-    cmp a, 0x22
-    beq LONG_337
-    jmp PRINT_VALUE
-LONG_337:
-    inc gh
-PRINT_STRING:
-    ld a, (gh)
-    inc gh
-    cmp a, 0x00
-    bne LONG_343
-    jmp UNTERMINATED_STRING
-LONG_343:
-    cmp a, 0x22
-    bne LONG_345
+    call IS_STRING
+    beq PRINT_VALUE
+    call STRING_EXPRESSION
+    ld cd, 0x0F80
+    call PUTS
     jmp PRINT_AFTER
-LONG_345:
-    call PUTCHAR
-    jmp PRINT_STRING
 PRINT_VALUE:
     call EXPR
     call PRINT_NUM
@@ -592,6 +586,15 @@ LONG_448:
 LONG_451:
     ret
 VALUE_VAR:
+    ld cd, KW_LEN
+    call MATCH
+    bne VALUE_NOT_LEN
+    jmp LENGTH
+VALUE_NOT_LEN:
+    call IS_STRING
+    beq VALUE_INTEGER
+    jmp TYPE_MISMATCH
+VALUE_INTEGER:
     call LOCATION
     ld b, (cd)
     ld a, (cd+0x01)
@@ -1194,7 +1197,22 @@ COMP_EQUAL:
     ld c, 0x02
     ret
 IF:
+    call IS_STRING
+    beq IF_INTEGER_LEFT
+    call STRING_EXPRESSION
+    ld cd, 0x0F80
+    ld ef, 0x0FC0
+    call COPY_STRING
+    ld a, 0x01
+    ld 0x00B2, a
+    jmp IF_LEFT_READY
+IF_INTEGER_LEFT:
     call EXPR
+    push ab
+    ld a, 0x00
+    ld 0x00B2, a
+    pop ab
+IF_LEFT_READY:
     push ab
     call SPACE
     ld b, 0x02
@@ -1239,11 +1257,24 @@ IF_OPERATOR_DONE:
     inc gh
 IF_RIGHT:
     push b
+    ld cd, 0x00B2
+    ld a, (cd)
+    cmp a, 0x00
+    beq IF_INTEGER_RIGHT
+    call STRING_EXPRESSION
+    ld cd, 0x0FC0
+    ld ef, 0x0F80
+    call COMPARE_STRINGS
+    pop d
+    pop ab
+    jmp IF_COMPARED
+IF_INTEGER_RIGHT:
     call EXPR
     ld ef, ab
     pop d
     pop ab
     call COMPARE
+IF_COMPARED:
     push cd
     call SPACE
     ld cd, KW_THEN
@@ -1365,6 +1396,10 @@ LONG_1048:
     ld 0x0093, e
     ret
 INPUT:
+    call IS_STRING
+    beq INPUT_INTEGER
+    jmp INPUT_STRING
+INPUT_INTEGER:
     call LOCATION
     push cd
     call EOL
@@ -1424,6 +1459,10 @@ KW_INPUT:
 ; 0094 points immediately past the active frames. Scratch 0098..00A5.
 FOR:
     call REQUIRE_RUN
+    call IS_STRING
+    beq FOR_INTEGER_VARIABLE
+    jmp TYPE_MISMATCH
+FOR_INTEGER_VARIABLE:
     call VARIABLE
     push cd
     call SPACE
@@ -1977,7 +2016,8 @@ HELP_TEXT:
     data "RX-82 native ROM: numbered lines; LIST RUN NEW SAVE LOAD QUIT", 0x0A
     data "LET PRINT INPUT IF THEN GOTO GOSUB RETURN FOR TO STEP NEXT END", 0x0A
     data "A-Z variables, signed 16-bit integers, + - * / and parentheses", 0x0A
-    data "DIM A(100): indices 0..100; 2048 array elements total", 0x0A, 0x00
+    data "DIM A(100): indices 0..100; 2048 array elements total", 0x0A
+    data "A$..Z$: 63 ASCII characters, + joins strings; LEN(A$) or LEN(A)", 0x0A, 0x00
 
 ; Diagnostic handlers share stack reset, file abort, line context and prompt recovery.
 INVALID_LINE_NUMBER:
@@ -2158,7 +2198,7 @@ CLEAR_ARRAY_DESCRIPTOR:
     ld ab, 0x9000
     ld 0x00B0, b
     ld 0x00B1, a
-    ret
+    jmp CLEAR_STRINGS
 ; Convert scalar variable address CD to the corresponding array descriptor.
 ARRAY_DESCRIPTOR:
     push ab
@@ -2179,6 +2219,10 @@ LOCATION:
     push cd
     call SPACE
     pop cd
+    cmp a, 0x24
+    bne LOCATION_INTEGER
+    jmp TYPE_MISMATCH
+LOCATION_INTEGER:
     cmp a, 0x28
     beq LOCATION_ARRAY
     pop ef
@@ -2225,6 +2269,11 @@ LOCATION_IN_RANGE:
     ret
 DIM:
     call VARIABLE
+    call PEEK
+    cmp a, 0x24
+    bne DIM_INTEGER_ARRAY
+    jmp STRING_ARRAYS_UNSUPPORTED
+DIM_INTEGER_ARRAY:
     push cd
     call SPACE
     cmp a, 0x28
@@ -2316,3 +2365,308 @@ EXPECTED_LPAREN:
     jmp REPORT_ERROR
 EXPECTED_LPAREN_TEXT:
     data "? EXPECTED (", 0x00
+
+; Strings: A$..Z$ have 64-byte slots at 0900..0F7F, including a NUL.
+; 0F80..0FBF is the expression buffer; 0FC0..0FFF holds IF's left operand.
+; 00B2 selects IF operand type. Strings never allocate from the array pool.
+CLEAR_STRINGS:
+    ld cd, 0x0900
+    ld a, 0x00
+CLEAR_STRING_BYTE:
+    ld (cd), a
+    inc cd
+    cmp cd, 0x1000
+    bne CLEAR_STRING_BYTE
+    ret
+
+; Look through leading parentheses, without consuming source. Z means numeric.
+; Preserves CD/EF/GH; AB is scratch.
+IS_STRING:
+    push gh
+IS_STRING_START:
+    call SPACE
+    cmp a, 0x28
+    bne IS_STRING_ATOM
+    inc gh
+    jmp IS_STRING_START
+IS_STRING_ATOM:
+    cmp a, 0x22
+    beq IS_STRING_YES
+    cmp a, 0x41
+    bcc IS_STRING_NO
+    cmp a, 0x5B
+    bcs IS_STRING_NO
+    inc gh
+    call PEEK
+    cmp a, 0x24
+    beq IS_STRING_YES
+IS_STRING_NO:
+    ld a, 0x00
+    jmp IS_STRING_DONE
+IS_STRING_YES:
+    ld a, 0x01
+IS_STRING_DONE:
+    pop gh
+    cmp a, 0x00
+    ret
+
+; Parse A$..Z$, returning the string slot in CD.
+STRING_VARIABLE:
+    call VARIABLE
+    call PEEK
+    cmp a, 0x24
+    beq STRING_VARIABLE_SUFFIX
+    jmp TYPE_MISMATCH
+STRING_VARIABLE_SUFFIX:
+    inc gh
+    ld ab, cd
+    sec
+    sub ab, 0x0300
+    clc
+    add ab, ab
+    clc
+    add ab, ab
+    clc
+    add ab, ab
+    clc
+    add ab, ab
+    clc
+    add ab, ab
+    clc
+    add ab, 0x0900
+    ld cd, ab
+    ret
+
+; Build a complete string before changing a variable. CD/EF are preserved.
+STRING_EXPRESSION:
+    push cd
+    push ef
+    ld ef, 0x0F80
+    call STRING_SEQUENCE
+    ld (ef), 0x00
+    pop ef
+    pop cd
+    ret
+STRING_SEQUENCE:
+    cmp sp, 0xA000
+    bcs STRING_DEPTH_OK
+    jmp EXPRESSION_TOO_DEEP
+STRING_DEPTH_OK:
+    call STRING_ATOM
+    call SPACE
+    cmp a, 0x2B
+    bne STRING_SEQUENCE_DONE
+    inc gh
+    jmp STRING_SEQUENCE
+STRING_SEQUENCE_DONE:
+    ret
+STRING_ATOM:
+    call SPACE
+    cmp a, 0x22
+    beq STRING_LITERAL
+    cmp a, 0x28
+    beq STRING_PAREN
+    call IS_STRING
+    bne STRING_NAMED
+    jmp TYPE_MISMATCH
+STRING_NAMED:
+    call STRING_VARIABLE
+STRING_VARIABLE_BYTE:
+    ld a, (cd)
+    cmp a, 0x00
+    beq STRING_ATOM_DONE
+    call STRING_APPEND
+    inc cd
+    jmp STRING_VARIABLE_BYTE
+STRING_ATOM_DONE:
+    ret
+STRING_PAREN:
+    inc gh
+    call STRING_SEQUENCE
+    call SPACE
+    cmp a, 0x29
+    beq STRING_PAREN_CLOSE
+    jmp EXPECTED_RPAREN
+STRING_PAREN_CLOSE:
+    inc gh
+    ret
+STRING_LITERAL:
+    inc gh
+STRING_LITERAL_BYTE:
+    ld a, (gh)
+    inc gh
+    cmp a, 0x00
+    bne STRING_LITERAL_NOT_END
+    jmp UNTERMINATED_STRING
+STRING_LITERAL_NOT_END:
+    cmp a, 0x22
+    beq STRING_ATOM_DONE
+    call STRING_APPEND
+    jmp STRING_LITERAL_BYTE
+
+; Append ASCII A to scratch at EF, allowing at most 63 bytes plus NUL.
+STRING_APPEND:
+    cmp a, 0x09
+    beq STRING_APPEND_VALID
+    cmp a, 0x20
+    bcs STRING_APPEND_PRINTABLE
+    jmp INVALID_STRING_CHARACTER
+STRING_APPEND_PRINTABLE:
+    cmp a, 0x7F
+    bcc STRING_APPEND_VALID
+    jmp INVALID_STRING_CHARACTER
+STRING_APPEND_VALID:
+    cmp ef, 0x0FBF
+    bcc STRING_APPEND_FITS
+    jmp STRING_TOO_LONG
+STRING_APPEND_FITS:
+    ld (ef), a
+    inc ef
+    ret
+
+; Copy a validated NUL-terminated string from CD to EF. GH is untouched.
+COPY_STRING:
+    ld a, (cd)
+    ld (ef), a
+    inc cd
+    inc ef
+    cmp a, 0x00
+    bne COPY_STRING
+    ret
+ASSIGN_STRING:
+    call STRING_VARIABLE
+    push cd
+    call SPACE
+    cmp a, 0x3D
+    beq ASSIGN_STRING_VALUE
+    jmp EXPECTED_EQUALS
+ASSIGN_STRING_VALUE:
+    inc gh
+    call STRING_EXPRESSION
+    call EOL
+    pop ef
+    ld cd, 0x0F80
+    jmp COPY_STRING
+INPUT_STRING:
+    call STRING_VARIABLE
+    push cd
+    call EOL
+    ld a, 0x3F
+    call PUTCHAR
+    ld a, 0x20
+    call PUTCHAR
+    call READLINE
+    ld gh, 0x0200
+    ld ef, 0x0F80
+INPUT_STRING_BYTE:
+    ld a, (gh)
+    cmp a, 0x00
+    beq INPUT_STRING_END
+    call STRING_APPEND
+    inc gh
+    jmp INPUT_STRING_BYTE
+INPUT_STRING_END:
+    ld (ef), 0x00
+    pop ef
+    ld cd, 0x0F80
+    jmp COPY_STRING
+
+; Bytewise, case-sensitive string comparison; C=1 less, 2 equal, 4 greater.
+COMPARE_STRINGS:
+    ld a, (cd)
+    ld b, (ef)
+    cmp a, b
+    bcs COMPARE_STRINGS_NOT_LESS
+    jmp COMP_LESS
+COMPARE_STRINGS_NOT_LESS:
+    beq COMPARE_STRINGS_EQUAL_BYTE
+    jmp COMP_GREATER
+COMPARE_STRINGS_EQUAL_BYTE:
+    cmp a, 0x00
+    bne COMPARE_STRINGS_NEXT
+    jmp COMP_EQUAL
+COMPARE_STRINGS_NEXT:
+    inc cd
+    inc ef
+    jmp COMPARE_STRINGS
+
+; LEN(string expression) or LEN(bare array name), returned as a signed integer.
+KW_LEN:
+    data "LEN", 0x00
+LENGTH:
+    call SPACE
+    cmp a, 0x28
+    beq LENGTH_OPEN
+    jmp EXPECTED_LPAREN
+LENGTH_OPEN:
+    inc gh
+    call IS_STRING
+    beq LENGTH_ARRAY
+    call STRING_EXPRESSION
+    ld cd, 0x0F80
+    ld b, 0x00
+LENGTH_STRING_BYTE:
+    ld a, (cd)
+    cmp a, 0x00
+    beq LENGTH_CLOSE
+    inc b
+    inc cd
+    jmp LENGTH_STRING_BYTE
+LENGTH_ARRAY:
+    call SPACE
+    cmp a, 0x41
+    bcs LENGTH_ARRAY_LETTER
+    jmp TYPE_MISMATCH
+LENGTH_ARRAY_LETTER:
+    cmp a, 0x5B
+    bcc LENGTH_ARRAY_NAME
+    jmp TYPE_MISMATCH
+LENGTH_ARRAY_NAME:
+    call VARIABLE
+    push cd
+    call SPACE
+    cmp a, 0x29
+    beq LENGTH_ARRAY_END
+    jmp TYPE_MISMATCH
+LENGTH_ARRAY_END:
+    pop cd
+    call ARRAY_DESCRIPTOR
+    ld f, (cd)
+    ld e, (cd+0x01)
+    cmp ef, 0x0000
+    bne LENGTH_ARRAY_DIMENSIONED
+    jmp ARRAY_NOT_DIMENSIONED
+LENGTH_ARRAY_DIMENSIONED:
+    ld b, (cd+0x02)
+    ld a, (cd+0x03)
+    inc ab
+LENGTH_CLOSE:
+    push ab
+    call SPACE
+    cmp a, 0x29
+    beq LENGTH_END
+    jmp EXPECTED_RPAREN
+LENGTH_END:
+    inc gh
+    pop ab
+    ret
+TYPE_MISMATCH:
+    ld cd, TYPE_MISMATCH_TEXT
+    jmp REPORT_ERROR
+TYPE_MISMATCH_TEXT:
+    data "? TYPE MISMATCH", 0x00
+STRING_TOO_LONG:
+    ld cd, STRING_TOO_LONG_TEXT
+    jmp REPORT_ERROR
+STRING_TOO_LONG_TEXT:
+    data "? STRING TOO LONG", 0x00
+INVALID_STRING_CHARACTER:
+    ld cd, INVALID_STRING_CHARACTER_TEXT
+    jmp REPORT_ERROR
+INVALID_STRING_CHARACTER_TEXT:
+    data "? INVALID STRING CHARACTER", 0x00
+STRING_ARRAYS_UNSUPPORTED:
+    ld cd, STRING_ARRAYS_UNSUPPORTED_TEXT
+    jmp REPORT_ERROR
+STRING_ARRAYS_UNSUPPORTED_TEXT:
+    data "? STRING ARRAYS NOT SUPPORTED", 0x00

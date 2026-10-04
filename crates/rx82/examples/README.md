@@ -15,20 +15,24 @@ otherwise agree.
 | :--- | :--- | :--- |
 | [countdown.bas](countdown.bas) | Negative `STEP` | 10, 8, 6, 4, 2, 0, then `Lift off!` |
 | [sort.bas](sort.bas) | `DIM`, indexed assignment, nested loops, `GOSUB` | Sorts six integers into 1, 2, 3, 5, 7, 9 |
+| [greeting.bas](greeting.bas) | String `INPUT`, concatenation, comparison, `LEN` for strings and arrays | Input Ada produces `Hello, Ada!`, length 11, 4 array elements, last square 9 |
 | [squares.bas](squares.bas) | `INPUT`, multiplication, `FOR` | Input 5 produces squares 1, 4, 9, 16, 25 |
 | [fibonacci.bas](fibonacci.bas) | Assignments, addition, loop state | Terms 0 through 15, ending at 610 |
 | [factorials.bas](factorials.bas) | `GOSUB`, nested and zero-trip loops | 0! through 7!: 1, 1, 2, 6, 24, 120, 720, 5040 |
 | [multiplication.bas](multiplication.bas) | Nested loops, tab-separated `PRINT` | A 6 by 6 multiplication table |
 | [gcd.bas](gcd.bas) | Two inputs, integer division, conditionals, subroutines | Inputs 252 and 105 produce `GCD = 21` |
 
-All examples use single-letter variables and signed 16-bit values. Squares fit
+All examples use single-letter variable names and signed 16-bit numeric values. Squares fit
 for inputs up to 181; larger inputs eventually overflow. The GCD example accepts
 positive integers from 1 to 32767 and rejects nonpositive inputs.
+The greeting accepts an empty name as `friend`; names of up to 55 characters
+leave room for the greeting within the 63-character string limit.
 
 For input-driven examples, enter values when prompted or pipe them:
 
 ```sh
 printf '252\n105\n' | cargo run -p rx82 -- basic --native crates/rx82/examples/gcd.bas
+printf 'Ada\n' | cargo run -p rx82 -- basic --native crates/rx82/examples/greeting.bas
 ```
 
 ## Inspect native execution
@@ -94,3 +98,8 @@ To inspect its storage, add `--break-before-run`, enter `G` to execute,
 then `M 0800` and `M 9000`. Array A's descriptor is `00 90 05 00`
 (base `9000`, inclusive bound 5); its sorted elements are
 `01 00 02 00 03 00 05 00 07 00 09 00`. Scalar A at `0300` remains zero.
+
+For strings, start `greeting.bas` with `--native --break-before-run`. Enter
+`G`, then `I Ada` and `G` to answer its prompt. `M 0A80` shows G$ as
+`Hello, Ada!` in the ASCII column; `M 0C40` shows N$ as `Ada`. `M 9000`
+shows the four array elements `0, 1, 4, 9` as little-endian words.
