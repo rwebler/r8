@@ -161,16 +161,23 @@ pub fn debug(source: &str, break_before_run: bool) -> Result<()> {
 mod tests {
     use super::*;
     fn session(source: &str) -> (System, String) {
+        session_with_budget(source, 5_000_000)
+    }
+    fn session_with_budget(source: &str, budget: u32) -> (System, String) {
         let (mut sys, shared) = machine();
         shared.borrow_mut().input.extend(source.bytes());
         shared.borrow_mut().eof = true;
-        for _ in 0..5_000_000_u32 {
+        for _ in 0..budget {
             if sys.cpu.halt {
                 break;
             }
             sys.tick();
         }
-        assert!(sys.cpu.halt, "guest did not halt at {:04X}", sys.cpu.pc);
+        assert!(
+            sys.cpu.halt,
+            "guest did not halt at {:04X} for {source}",
+            sys.cpu.pc
+        );
         let output = String::from_utf8(shared.borrow().output.clone()).unwrap();
         (sys, output)
     }
@@ -301,18 +308,109 @@ mod tests {
         assert!(output.contains("? -32768\n7\n"), "{output}");
     }
     #[test]
-    fn native_loop_errors_return_to_prompt() {
-        for source in [
-            "10 FOR I=1 TO 2 STEP 0\n20 NEXT",
-            "10 FOR I=1 TO 2\n20 NEXT J",
-            "10 NEXT I",
-            "10 FOR I=1 TO 2",
-            "10 FOR I=32767 TO 32767\n20 NEXT I",
+    fn native_runtime_diagnostics_report_cause_and_line() {
+        for (source, message, line) in [
+            ("10 NEXT I", "NEXT WITHOUT FOR", 10_u16),
+            ("10 GOTO 999", "UNDEFINED LINE", 10),
+            ("10 GOSUB 999", "UNDEFINED LINE", 10),
+            ("10 GOTO 65535", "UNDEFINED LINE", 10),
+            ("65535 GOTO 1", "UNDEFINED LINE", u16::MAX),
+            ("10 RETURN", "RETURN WITHOUT GOSUB", 10),
+            ("10 FOR I=1 TO 2 STEP 0\n20 NEXT", "ZERO STEP", 10),
+            ("10 FOR I=1 TO 2", "FOR WITHOUT NEXT", 10),
+            ("10 FOR I=1 TO 2\n20 NEXT J", "NEXT MISMATCH", 10),
+            (
+                "10 FOR I=1 TO 2\n20 FOR I=1 TO 2\n30 NEXT\n40 NEXT",
+                "FOR VARIABLE ALREADY ACTIVE",
+                20,
+            ),
+            (
+                "10 GOTO 30\n20 FOR I=1 TO 2\n30 NEXT I",
+                "NEXT WITHOUT FOR",
+                30,
+            ),
+            ("10 FOR I=32767 TO 32767\n20 NEXT I", "INTEGER OVERFLOW", 20),
+            ("10 GOSUB 10", "GOSUB STACK FULL", 10),
+            ("10 A 3", "EXPECTED =", 10),
+            ("10 PRINT \"hello", "UNTERMINATED STRING", 10),
+            ("10 PRINT (1+2", "EXPECTED )", 10),
+            ("10 LET 1=2", "EXPECTED VARIABLE A-Z", 10),
+            ("10 IF 1 THEN PRINT 2", "EXPECTED COMPARISON", 10),
+            ("10 IF 1=1 PRINT 2", "EXPECTED THEN", 10),
+            ("10 FOR I=1 2\n20 NEXT", "EXPECTED TO", 10),
+            ("10 IF 1=1 THEN NEXT I", "FOR/NEXT MUST STAND ALONE", 10),
+            ("10 END extra", "UNEXPECTED INPUT", 10),
+            ("10 NEW", "DIRECT MODE ONLY", 10),
         ] {
-            let (_, output) = session(&format!("{source}\nRUN\nPRINT 7\nQUIT\n"));
+            let (_, output) = session_with_budget(
+                &format!("{source}\nRUN\nPRINT 7\nNEW\n10 PRINT 8\nRUN\nQUIT\n"),
+                20_000_000,
+            );
             assert!(
-                output.contains("? ") && output.contains("> 7\n"),
+                output.contains(&format!("? {message} IN LINE {line}\n")),
+                "{source}\n{output}"
+            );
+            assert_eq!(output.matches("? ").count(), 1, "{output}");
+            assert!(
+                output.contains("> 7\n") && output.contains("8\n"),
                 "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_direct_errors_have_no_stale_program_line() {
+        for (command, message) in [
+            ("0 PRINT 1", "INVALID LINE NUMBER"),
+            ("GOTO 10", "REQUIRES RUN"),
+            ("SAVE name", "EXPECTED QUOTED FILENAME"),
+            ("SAVE \"name", "UNTERMINATED STRING"),
+            ("PRINT 1 garbage", "UNEXPECTED INPUT"),
+        ] {
+            let (_, output) = session(&format!("10 END\nRUN\n{command}\nPRINT 7\nQUIT\n"));
+            assert!(output.contains(&format!("? {message}\n")), "{output}");
+            assert!(!output.contains(" IN LINE "), "{output}");
+            assert!(output.contains("> 7\n"), "{output}");
+        }
+    }
+
+    #[test]
+    fn native_full_program_preserves_records_and_allows_editing() {
+        use core::fmt::Write as _;
+        let mut source = String::new();
+        for line in 1..=256_u16 {
+            writeln!(source, "{line} REM").unwrap();
+        }
+        source.push_str("257 REM extra\nPRINT 7\n1 PRINT 42\n256\n257 REM replacement\nQUIT\n");
+        let (sys, output) = session_with_budget(&source, 20_000_000);
+        assert!(output.contains("? PROGRAM FULL\n"), "{output}");
+        assert_eq!(output.matches("? ").count(), 1, "{output}");
+        assert!(output.contains("> 7\n"), "{output}");
+        assert_eq!(sys.mem.get(0x1000), 1);
+        assert_eq!(sys.mem.get(0x1002), b'P');
+        assert_eq!(
+            u16::from_le_bytes([sys.mem.get(0x8F80), sys.mem.get(0x8F81)]),
+            257
+        );
+    }
+
+    #[test]
+    fn native_rejected_input_discards_the_rest_of_the_line() {
+        for (line, message) in [
+            (
+                format!("10 REM {}PRINT 99", "x".repeat(130)),
+                "LINE TOO LONG",
+            ),
+            ("10 REM \0PRINT 99".to_owned(), "INVALID CHARACTER"),
+        ] {
+            let (_, output) = session(&format!("{line}\nPRINT 7\nQUIT\n"));
+            assert!(output.contains(&format!("? {message}\n")), "{output}");
+            assert_eq!(output.matches("? ").count(), 1, "{output}");
+            assert!(output.contains("> 7\n"), "{output}");
+            let (_, eof_output) = session(&line);
+            assert!(
+                eof_output.contains(&format!("? {message}\n")),
+                "{eof_output}"
             );
         }
     }
@@ -371,11 +469,14 @@ mod tests {
             use core::fmt::Write as _;
             writeln!(too_many_lines, "{line} REM").unwrap();
         }
-        for invalid in [format!("10 REM {}", "x".repeat(200)), too_many_lines] {
+        for (invalid, expected) in [
+            (format!("10 REM {}", "x".repeat(200)), "LINE TOO LONG"),
+            (too_many_lines, "PROGRAM FULL"),
+        ] {
             std::fs::write(&path, invalid).unwrap();
             let (_, rejected) = session(&format!("10 PRINT 7\nLOAD \"{filename}\"\nRUN\nQUIT\n"));
             assert!(
-                rejected.contains("? ERROR") && rejected.contains("> 7\n"),
+                rejected.contains(&format!("? {expected}\n")) && rejected.contains("> 7\n"),
                 "{rejected}"
             );
         }

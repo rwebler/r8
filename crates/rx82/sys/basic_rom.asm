@@ -37,7 +37,7 @@ LONG_29:
     call NUMBER
     cmp ab, 0x0000
     bne LONG_32
-    jmp ERROR
+    jmp INVALID_LINE_NUMBER
 LONG_32:
     push ab
     call SPACE
@@ -225,7 +225,7 @@ EDIT_NEXT:
 LONG_162:
     cmp ef, 0x0000
     bne LONG_164
-    jmp ERROR
+    jmp PROGRAM_FULL
 LONG_164:
     ld cd, ef
 EDIT_FOUND:
@@ -378,7 +378,7 @@ GOTO:
 GOTO_TARGET:
     cmp ab, 0x0000
     bne LONG_295
-    jmp ERROR
+    jmp INVALID_LINE_NUMBER
 LONG_295:
     ; Require an exact target, then set current to target minus one.
     dec ab
@@ -386,13 +386,13 @@ LONG_295:
     call FIND_NEXT
     cmp cd, 0x0000
     bne LONG_301
-    jmp ERROR
+    jmp UNDEFINED_LINE
 LONG_301:
     pop ab
     inc ab
     cmp ab, ef
     beq LONG_305
-    jmp ERROR
+    jmp UNDEFINED_LINE
 LONG_305:
     ld cd, 0x00A4
     ld c, (cd)
@@ -412,7 +412,7 @@ ASSIGN:
     call SPACE
     cmp a, 0x3D
     beq LONG_321
-    jmp ERROR
+    jmp EXPECTED_EQUALS
 LONG_321:
     inc gh
     call EXPR
@@ -440,7 +440,7 @@ PRINT_STRING:
     inc gh
     cmp a, 0x00
     bne LONG_343
-    jmp ERROR
+    jmp UNTERMINATED_STRING
 LONG_343:
     cmp a, 0x22
     bne LONG_345
@@ -556,7 +556,7 @@ VALUE:
     ; Keep recursion from colliding with program storage.
     cmp sp, 0xA000
     bcs LONG_437
-    jmp ERROR
+    jmp EXPRESSION_TOO_DEEP
 LONG_437:
     call SPACE
     cmp a, 0x28
@@ -600,7 +600,7 @@ VALUE_PAREN:
     call SPACE
     cmp a, 0x29
     beq LONG_467
-    jmp ERROR
+    jmp EXPECTED_RPAREN
 LONG_467:
     inc gh
     pop ab
@@ -784,11 +784,11 @@ VARIABLE:
     call SPACE
     cmp a, 0x41
     bcs LONG_611
-    jmp ERROR
+    jmp EXPECTED_VARIABLE
 LONG_611:
     cmp a, 0x5B
     bcc LONG_613
-    jmp ERROR
+    jmp EXPECTED_VARIABLE
 LONG_613:
     sec
     sub a, 0x41
@@ -839,12 +839,12 @@ NUMBER_ACCUMULATE:
     clc
     add ef, ef
     bcc LONG_652
-    jmp ERROR
+    jmp OVERFLOW
 LONG_652:
     clc
     add ef, ab
     bcc LONG_655
-    jmp ERROR
+    jmp OVERFLOW
 LONG_655:
     inc gh
     jmp NUMBER_NEXT
@@ -944,7 +944,7 @@ EOL:
     call SPACE
     cmp a, 0x00
     beq LONG_737
-    jmp ERROR
+    jmp SYNTAX_ERROR
 LONG_737:
     ret
 MATCH:
@@ -1008,12 +1008,12 @@ LONG_779:
 LONG_781:
     cmp a, 0x20
     bcs LONG_783
-    jmp ERROR
+    jmp BAD_INPUT_CHARACTER
 LONG_783:
 READLINE_STORE:
     cmp gh, 0x027A
     bcc LONG_786
-    jmp ERROR
+    jmp INPUT_TOO_LONG
 LONG_786:
     ld (gh), a
     inc gh
@@ -1023,7 +1023,7 @@ READLINE_FILE_END:
     ld a, (cd)
     cmp a, 0x00
     bne LONG_794
-    jmp ERROR
+    jmp BAD_INPUT_CHARACTER
 LONG_794:
 READLINE_END:
     ld (gh), 0x00
@@ -1088,8 +1088,8 @@ LONG_844:
     call PUTCHAR
     inc cd
     jmp PUTS
-ERROR:
-    ld cd, ERROR_TEXT
+SYNTAX_ERROR:
+    ld cd, SYNTAX_ERROR_TEXT
 REPORT_ERROR:
     ld sp, 0xBFFF
     ld a, 0x00
@@ -1119,8 +1119,8 @@ BANNER:
     data "RX-82 NATIVE BASIC", 0x0A, 0x00
 PROMPT_TEXT:
     data "> ", 0x00
-ERROR_TEXT:
-    data "? ERROR", 0x00
+SYNTAX_ERROR_TEXT:
+    data "? UNEXPECTED INPUT", 0x00
 KW_REM:
     data "REM", 0x00
 KW_PRINT:
@@ -1149,7 +1149,7 @@ REQUIRE_RUN:
     ld a, (cd)
     cmp a, 0x00
     bne LONG_906
-    jmp ERROR
+    jmp PROGRAM_ONLY
 LONG_906:
     pop cd
     pop ab
@@ -1204,7 +1204,7 @@ LONG_942:
     ld b, 0x04
     cmp a, 0x3E
     beq LONG_945
-    jmp ERROR
+    jmp EXPECTED_COMPARISON
 LONG_945:
     inc gh
     call PEEK
@@ -1243,7 +1243,7 @@ IF_RIGHT:
     ld cd, KW_THEN
     call MATCH
     beq LONG_976
-    jmp ERROR
+    jmp EXPECTED_THEN
 LONG_976:
     pop cd
     cmp c, d
@@ -1293,12 +1293,12 @@ IF_STATEMENT:
     ld cd, KW_FOR
     call MATCH
     bne LONG_1006
-    jmp ERROR
+    jmp STANDALONE_LOOP
 LONG_1006:
     ld cd, KW_NEXT
     call MATCH
     bne LONG_1009
-    jmp ERROR
+    jmp STANDALONE_LOOP
 LONG_1009:
     jmp STATEMENT
 GOSUB:
@@ -1313,7 +1313,7 @@ GOSUB:
     ld e, (cd+0x01)
     cmp ef, 0x0500
     bcc LONG_1022
-    jmp ERROR
+    jmp GOSUB_STACK_FULL
 LONG_1022:
     ld cd, 0x0080
     ld b, (cd)
@@ -1341,7 +1341,7 @@ RETURN:
     ld e, (cd+0x01)
     cmp ef, 0x0400
     bne LONG_1048
-    jmp ERROR
+    jmp RETURN_WITHOUT_GOSUB
 LONG_1048:
     dec ef
     ld a, (ef)
@@ -1423,7 +1423,7 @@ FOR:
     call SPACE
     cmp a, 0x3D
     beq LONG_1122
-    jmp ERROR
+    jmp EXPECTED_EQUALS
 LONG_1122:
     inc gh
     call EXPR
@@ -1432,7 +1432,7 @@ LONG_1122:
     ld cd, KW_TO
     call MATCH
     beq LONG_1129
-    jmp ERROR
+    jmp EXPECTED_TO
 LONG_1129:
     call EXPR
     push ab
@@ -1449,7 +1449,7 @@ FOR_DEFAULT_STEP:
 FOR_STEP_READY:
     cmp ab, 0x0000
     bne LONG_1142
-    jmp ERROR
+    jmp ZERO_STEP
 LONG_1142:
     push ab
     call EOL
@@ -1479,7 +1479,7 @@ LONG_1164:
     ld a, (gh+0x05)
     cmp ab, cd
     bne LONG_1168
-    jmp ERROR
+    jmp LOOP_VARIABLE_ACTIVE
 LONG_1168:
     clc
     add gh, 0x0010
@@ -1494,7 +1494,7 @@ FOR_SCAN_NEXT:
     call FIND_NEXT
     cmp cd, 0x0000
     bne LONG_1181
-    jmp ERROR
+    jmp FOR_WITHOUT_NEXT
 LONG_1181:
     ld 0x00A0, f
     ld 0x00A1, e
@@ -1539,7 +1539,7 @@ LONG_1207:
     ld a, (cd+0x01)
     cmp ab, ef
     beq LONG_1216
-    jmp ERROR
+    jmp NEXT_MISMATCH
 LONG_1216:
 FOR_SET:
     ld cd, 0x0098
@@ -1575,7 +1575,7 @@ FOR_PUSH:
     ld e, (cd+0x01)
     cmp ef, 0x0800
     bcc LONG_1244
-    jmp ERROR
+    jmp FOR_STACK_FULL
 LONG_1244:
     ld cd, 0x0080
     ld b, (cd)
@@ -1635,7 +1635,7 @@ NEXT:
     ld a, (ef+0x01)
     cmp ab, cd
     bne LONG_1300
-    jmp ERROR
+    jmp NEXT_WITHOUT_FOR
 LONG_1300:
     sec
     sub ab, 0x0010
@@ -1658,7 +1658,7 @@ LONG_1307:
     ld a, (cd+0x05)
     cmp ab, ef
     beq LONG_1319
-    jmp ERROR
+    jmp NEXT_MISMATCH
 LONG_1319:
 NEXT_MATCH:
     ld cd, 0x00A2
@@ -1671,7 +1671,7 @@ NEXT_MATCH:
     ld c, (ef+0x03)
     cmp ab, cd
     beq LONG_1330
-    jmp ERROR
+    jmp NEXT_MISMATCH
 LONG_1330:
     ld d, (ef+0x04)
     ld c, (ef+0x05)
@@ -1784,7 +1784,7 @@ REQUIRE_DIRECT:
     ld a, (cd)
     cmp a, 0x00
     beq LONG_1425
-    jmp ERROR
+    jmp DIRECT_ONLY
 LONG_1425:
     ret
 FILENAME:
@@ -1792,7 +1792,7 @@ FILENAME:
     call SPACE
     cmp a, 0x22
     beq LONG_1431
-    jmp ERROR
+    jmp EXPECTED_FILENAME
 LONG_1431:
     inc gh
     ld a, 0x00
@@ -1802,7 +1802,7 @@ FILENAME_CHAR:
     inc gh
     cmp a, 0x00
     bne LONG_1439
-    jmp ERROR
+    jmp UNTERMINATED_STRING
 LONG_1439:
     cmp a, 0x22
     bne LONG_1441
@@ -1869,16 +1869,16 @@ LONG_1489:
 LONG_1494:
     cmp a, 0x30
     bcs LONG_1496
-    jmp ERROR
+    jmp INVALID_LINE_NUMBER
 LONG_1496:
     cmp a, 0x3A
     bcc LONG_1498
-    jmp ERROR
+    jmp INVALID_LINE_NUMBER
 LONG_1498:
     call NUMBER
     cmp ab, 0x0000
     bne LONG_1501
-    jmp ERROR
+    jmp INVALID_LINE_NUMBER
 LONG_1501:
     push ab
     call SPACE
@@ -1895,7 +1895,7 @@ LONG_1508:
     inc ab
     cmp ab, 0x0101
     bcc LONG_1514
-    jmp ERROR
+    jmp PROGRAM_FULL
 LONG_1514:
     ld (cd), b
     ld (cd+0x01), a
@@ -1971,3 +1971,169 @@ HELP_TEXT:
     data "RX-82 native ROM: numbered lines; LIST RUN NEW SAVE LOAD QUIT", 0x0A
     data "LET PRINT INPUT IF THEN GOTO GOSUB RETURN FOR TO STEP NEXT END", 0x0A
     data "A-Z variables, signed 16-bit integers, + - * / and parentheses", 0x0A, 0x00
+
+; Diagnostic handlers share stack reset, file abort, line context and prompt recovery.
+INVALID_LINE_NUMBER:
+    ld cd, INVALID_LINE_NUMBER_TEXT
+    jmp REPORT_ERROR
+INVALID_LINE_NUMBER_TEXT:
+    data "? INVALID LINE NUMBER", 0x00
+PROGRAM_FULL:
+    ld cd, PROGRAM_FULL_TEXT
+    jmp REPORT_ERROR
+PROGRAM_FULL_TEXT:
+    data "? PROGRAM FULL", 0x00
+UNDEFINED_LINE:
+    ld cd, UNDEFINED_LINE_TEXT
+    jmp REPORT_ERROR
+UNDEFINED_LINE_TEXT:
+    data "? UNDEFINED LINE", 0x00
+EXPECTED_EQUALS:
+    ld cd, EXPECTED_EQUALS_TEXT
+    jmp REPORT_ERROR
+EXPECTED_EQUALS_TEXT:
+    data "? EXPECTED =", 0x00
+UNTERMINATED_STRING:
+    ld cd, UNTERMINATED_STRING_TEXT
+    jmp REPORT_ERROR
+UNTERMINATED_STRING_TEXT:
+    data "? UNTERMINATED STRING", 0x00
+EXPRESSION_TOO_DEEP:
+    ld cd, EXPRESSION_TOO_DEEP_TEXT
+    jmp REPORT_ERROR
+EXPRESSION_TOO_DEEP_TEXT:
+    data "? EXPRESSION TOO DEEP", 0x00
+EXPECTED_RPAREN:
+    ld cd, EXPECTED_RPAREN_TEXT
+    jmp REPORT_ERROR
+EXPECTED_RPAREN_TEXT:
+    data "? EXPECTED )", 0x00
+EXPECTED_VARIABLE:
+    ld cd, EXPECTED_VARIABLE_TEXT
+    jmp REPORT_ERROR
+EXPECTED_VARIABLE_TEXT:
+    data "? EXPECTED VARIABLE A-Z", 0x00
+PROGRAM_ONLY:
+    ld cd, PROGRAM_ONLY_TEXT
+    jmp REPORT_ERROR
+PROGRAM_ONLY_TEXT:
+    data "? REQUIRES RUN", 0x00
+EXPECTED_COMPARISON:
+    ld cd, EXPECTED_COMPARISON_TEXT
+    jmp REPORT_ERROR
+EXPECTED_COMPARISON_TEXT:
+    data "? EXPECTED COMPARISON", 0x00
+EXPECTED_THEN:
+    ld cd, EXPECTED_THEN_TEXT
+    jmp REPORT_ERROR
+EXPECTED_THEN_TEXT:
+    data "? EXPECTED THEN", 0x00
+STANDALONE_LOOP:
+    ld cd, STANDALONE_LOOP_TEXT
+    jmp REPORT_ERROR
+STANDALONE_LOOP_TEXT:
+    data "? FOR/NEXT MUST STAND ALONE", 0x00
+GOSUB_STACK_FULL:
+    ld cd, GOSUB_STACK_FULL_TEXT
+    jmp REPORT_ERROR
+GOSUB_STACK_FULL_TEXT:
+    data "? GOSUB STACK FULL", 0x00
+RETURN_WITHOUT_GOSUB:
+    ld cd, RETURN_WITHOUT_GOSUB_TEXT
+    jmp REPORT_ERROR
+RETURN_WITHOUT_GOSUB_TEXT:
+    data "? RETURN WITHOUT GOSUB", 0x00
+EXPECTED_TO:
+    ld cd, EXPECTED_TO_TEXT
+    jmp REPORT_ERROR
+EXPECTED_TO_TEXT:
+    data "? EXPECTED TO", 0x00
+ZERO_STEP:
+    ld cd, ZERO_STEP_TEXT
+    jmp REPORT_ERROR
+ZERO_STEP_TEXT:
+    data "? ZERO STEP", 0x00
+LOOP_VARIABLE_ACTIVE:
+    ld cd, LOOP_VARIABLE_ACTIVE_TEXT
+    jmp REPORT_ERROR
+LOOP_VARIABLE_ACTIVE_TEXT:
+    data "? FOR VARIABLE ALREADY ACTIVE", 0x00
+FOR_WITHOUT_NEXT:
+    ld cd, FOR_WITHOUT_NEXT_TEXT
+    jmp REPORT_ERROR
+FOR_WITHOUT_NEXT_TEXT:
+    data "? FOR WITHOUT NEXT", 0x00
+NEXT_MISMATCH:
+    ld cd, NEXT_MISMATCH_TEXT
+    jmp REPORT_ERROR
+NEXT_MISMATCH_TEXT:
+    data "? NEXT MISMATCH", 0x00
+FOR_STACK_FULL:
+    ld cd, FOR_STACK_FULL_TEXT
+    jmp REPORT_ERROR
+FOR_STACK_FULL_TEXT:
+    data "? FOR STACK FULL", 0x00
+NEXT_WITHOUT_FOR:
+    ld cd, NEXT_WITHOUT_FOR_TEXT
+    jmp REPORT_ERROR
+NEXT_WITHOUT_FOR_TEXT:
+    data "? NEXT WITHOUT FOR", 0x00
+DIRECT_ONLY:
+    ld cd, DIRECT_ONLY_TEXT
+    jmp REPORT_ERROR
+DIRECT_ONLY_TEXT:
+    data "? DIRECT MODE ONLY", 0x00
+EXPECTED_FILENAME:
+    ld cd, EXPECTED_FILENAME_TEXT
+    jmp REPORT_ERROR
+EXPECTED_FILENAME_TEXT:
+    data "? EXPECTED QUOTED FILENAME", 0x00
+
+; A rejected input line must not leave its tail to become another command.
+BAD_INPUT_CHARACTER:
+    ld cd, BAD_INPUT_CHARACTER_TEXT
+    jmp DISCARD_INPUT_LINE
+INPUT_TOO_LONG:
+    ld cd, INPUT_TOO_LONG_TEXT
+DISCARD_INPUT_LINE:
+    push cd
+    ld cd, 0x00A6
+    ld a, (cd)
+    cmp a, 0x00
+    bne DISCARD_FILE_BYTE
+DISCARD_CONSOLE_WAIT:
+    ld cd, 0xFF00
+    ld a, (cd)
+    ld b, a
+    and a, 0x01
+    cmp a, 0x00
+    bne DISCARD_CONSOLE_BYTE
+    and b, 0x02
+    cmp b, 0x00
+    beq DISCARD_CONSOLE_WAIT
+    jmp DISCARD_DONE
+DISCARD_CONSOLE_BYTE:
+    ld cd, 0xFF01
+    ld a, (cd)
+    jmp DISCARD_CHECK_BYTE
+DISCARD_FILE_BYTE:
+    call FILE_CHECK
+    ld cd, 0xFF11
+    ld a, (cd)
+    and a, 0x02
+    cmp a, 0x00
+    bne DISCARD_DONE
+    ld cd, 0xFF13
+    ld a, (cd)
+DISCARD_CHECK_BYTE:
+    cmp a, 0x0A
+    beq DISCARD_DONE
+    pop cd
+    jmp DISCARD_INPUT_LINE
+DISCARD_DONE:
+    pop cd
+    jmp REPORT_ERROR
+BAD_INPUT_CHARACTER_TEXT:
+    data "? INVALID CHARACTER", 0x00
+INPUT_TOO_LONG_TEXT:
+    data "? LINE TOO LONG", 0x00

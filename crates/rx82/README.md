@@ -181,8 +181,8 @@ The native dialect supports `PRINT`, assignment (`LET` optional), numeric
 six comparisons with `IF ... THEN`, `GOTO`, `GOSUB`/`RETURN`, `FOR`/`NEXT` with
 `STEP`, `REM`, `END`/`STOP`, `LIST`, `RUN`, `NEW`, and `QUIT`. Bounds, step
 capture, and checked arithmetic follow the reference dialect. Invalid input
-reports an error and returns to the prompt; arithmetic errors identify overflow
-or division by zero and include the current program line.
+reports a specific cause and returns to the prompt. Errors raised during `RUN`
+include the current BASIC line number; direct-mode errors omit it.
 
 Native resource limits: variables are single letters A–Z, reset to zero on
 `RUN`; line numbers are 1–65535; source lines are limited to 122 bytes; storage
@@ -225,6 +225,41 @@ a little-endian line number followed by NUL-terminated source; zero marks a free
 record. ROM source is `sys/basic_rom.asm`; rebuild its checked-in image with
 `cargo run -p rx82 -- asm crates/rx82/sys/basic_rom.asm`. Tests verify image/source
 agreement, ROM size, output, and guest RAM contents.
+
+### Native diagnostics
+
+For example, running `10 NEXT I` reports `? NEXT WITHOUT FOR IN LINE 10`.
+Running `10 GOTO 999` without line 999 reports `? UNDEFINED LINE IN LINE 10`.
+The line suffix identifies the executing statement, not the missing target.
+
+| Message | Cause / remedy |
+| :--- | :--- |
+| `NEXT WITHOUT FOR` | No active loop in this subroutine; enter through its `FOR`. |
+| `NEXT MISMATCH` | The variable or closing statement does not match the active loop. |
+| `FOR WITHOUT NEXT` | The ROM could not find a closing `NEXT`. |
+| `ZERO STEP` | Use a nonzero `STEP`. |
+| `FOR VARIABLE ALREADY ACTIVE` | Use distinct variables for nested loops. |
+| `RETURN WITHOUT GOSUB` | There is no subroutine return address. |
+| `UNDEFINED LINE` | A `GOTO`, `GOSUB`, or conditional jump target does not exist. |
+| `PROGRAM FULL` | All 256 program slots are occupied, or a loaded file exceeds the 256-nonblank-line limit. Delete lines before adding more. |
+| `GOSUB STACK FULL`, `FOR STACK FULL`, `EXPRESSION TOO DEEP` | Execution exhausted the corresponding stack limit. |
+| `INVALID LINE NUMBER` | A source line or target has an invalid number, including zero. |
+| `LINE TOO LONG`, `INVALID CHARACTER` | Input exceeds 122 bytes or contains an unsupported control byte. |
+| `INTEGER OVERFLOW`, `DIVISION BY ZERO` | Arithmetic exceeded its range or divided by zero. |
+| `REQUIRES RUN`, `DIRECT MODE ONLY` | Use the statement in a stored program or at the prompt, respectively. |
+| `FOR/NEXT MUST STAND ALONE` | Put the loop statement on its own numbered line, outside `IF ... THEN`. |
+| `FILE ERROR` | The host file operation failed. Check its path and permissions. |
+
+Syntax diagnostics identify the missing component: `EXPECTED =`, `EXPECTED )`,
+`EXPECTED TO`, `EXPECTED THEN`, `EXPECTED COMPARISON`, `EXPECTED VARIABLE A-Z`,
+or `EXPECTED QUOTED FILENAME`. An open quote reports `UNTERMINATED STRING`;
+extra text after a complete statement reports `UNEXPECTED INPUT`.
+
+Errors reset the execution stack and return to the prompt without deleting the
+program. Failed `LOAD` validation preserves the existing program and variables.
+Rejected input lines are discarded through their newline (or EOF), so their
+remaining text cannot accidentally become another command. A mismatched `NEXT`
+found while scanning a `FOR` reports the opening `FOR` line, where the scan runs.
 
 ## Assembling R8 source files
 
