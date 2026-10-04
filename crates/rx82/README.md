@@ -108,6 +108,7 @@ The initial dialect supports:
   `=`, `<>`, `<`, `<=`, `>`, and `>=` comparisons. Both operands must be the
   same type. Strings compare in case-sensitive ASCII order.
 - `FOR name = start TO limit [STEP step]` and `NEXT [name]` in stored programs.
+- `DATA` constants, `READ` into variables or array elements, and `RESTORE [line]`.
 - `GOTO line`, `GOSUB line`, `RETURN`, `END`, `STOP`, and `REM` comments.
 
 Keywords and variable names are case-insensitive; names start with a letter and
@@ -150,6 +151,56 @@ and arrays. Failed string assignments and failed `LOAD` operations preserve
 existing values. `SAVE` stores source, including string literals, rather than
 runtime values. String arrays are not supported. The native ROM has 26 string
 variables (`A$`–`Z$`); the reference interpreter also permits longer names.
+
+### DATA / READ / RESTORE
+
+Use `DATA` to keep a table together, and `READ` to fill its array:
+
+```basic
+10 DIM A(5)
+20 FOR I=0 TO LEN(A)-1
+30 READ A(I)
+40 NEXT I
+50 PRINT A(0),A(5)
+60 END
+100 DATA 9,2,7
+110 DATA 1,5,3
+```
+
+As in the [MSX BASIC reference](https://www.msxarchive.nl/pub/msx/docs/manuals/msxtech.pdf),
+`DATA` statements are skipped during execution. `READ` visits their constants
+in ascending line-number order, including data after `END`, and continues from
+the first unread item on each call. The cursor is shared by the program,
+subroutines, and direct-mode commands. Only standalone `DATA` lines contribute
+items; each source line still contains one statement.
+
+`READ A,B,A(I),N$` assigns items from left to right. Numeric targets require
+unquoted signed decimal integer constants in the range -32768 to 32767;
+expressions, floating point, and hexadecimal constants are not supported.
+String targets accept quoted or unquoted text, preserving case. Surround text
+containing commas, colons, or significant edge spaces with quotes:
+
+```basic
+100 DATA MiXeD words,"Hello, world","",-12
+```
+
+Unquoted text is trimmed at both ends. Quoted `""` is an empty string; omitted
+fields and trailing commas are invalid. Each item is limited to 63 ASCII
+characters. DATA syntax is checked when an item is read, so unused items do
+not cause runtime errors. Numeric-looking items can be read as text with a
+string target; quoted text is not converted to an integer.
+
+`RESTORE` rewinds to the first item. `RESTORE 110` requires an existing line
+and starts searching for data at that line, even if it is not itself a `DATA`
+statement. The optional line number must be a literal, not an expression.
+`RUN`, `NEW`, successful `LOAD`, and numbered-line edits reset the cursor.
+`SAVE` preserves the DATA source; failed `LOAD` leaves the cursor intact.
+
+Reading past the available items reports `OUT OF DATA`. A failed read preserves
+its destination and leaves that item unread; assignments earlier in the same
+`READ` remain in effect. Errors during a program identify the executing `READ`
+line. The [table example](examples/data_table.bas) demonstrates mixed data and
+`RESTORE`; [sorting](examples/sort.bas) now fills its array from `DATA`.
 
 ### FOR / NEXT loops
 
@@ -220,7 +271,7 @@ empty `I` sends a blank line. `Q` (or host EOF) exits the monitor; `I QUIT` then
 line numbers; see the monitor commands below.
 
 The native dialect supports `PRINT`, assignment (`LET` optional), integer and
-string `INPUT`, string concatenation, `LEN`, one-dimensional integer arrays
+string `INPUT`, string concatenation, `LEN`, `DATA`/`READ`/`RESTORE`, one-dimensional integer arrays
 declared with `DIM`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
 six comparisons with `IF ... THEN`, `GOTO`, `GOSUB`/`RETURN`, `FOR`/`NEXT` with
 `STEP`, `REM`, `END`/`STOP`, `LIST`, `RUN`, `NEW`, and `QUIT`. Bounds, step
@@ -278,6 +329,10 @@ record. ROM source is `sys/basic_rom.asm`; rebuild its checked-in image with
 `cargo run -p rx82 -- asm crates/rx82/sys/basic_rom.asm`. Tests verify image/source
 agreement, ROM size, output, and guest RAM contents.
 
+The native DATA cursor uses little-endian words at `00B4` (last scanned line)
+and `00B6` (next item's source address; zero means search the next line).
+The ROM parses DATA directly from program records without a separate data copy.
+
 ### Native diagnostics
 
 For example, running `10 NEXT I` reports `? NEXT WITHOUT FOR IN LINE 10`.
@@ -294,6 +349,8 @@ The line suffix identifies the executing statement, not the missing target.
 | `STRING TOO LONG` | A string value exceeds 63 characters. Shorten it before concatenating. |
 | `INVALID STRING CHARACTER` | Use printable ASCII or tabs. |
 | `STRING ARRAYS NOT SUPPORTED` | `DIM` currently declares integer arrays only. |
+| `OUT OF DATA` | No unread DATA items remain; add data or use `RESTORE`. |
+| `INVALID DATA` | A read encountered an empty field or malformed constant delimiter. |
 | `NEXT WITHOUT FOR` | No active loop in this subroutine; enter through its `FOR`. |
 | `NEXT MISMATCH` | The variable or closing statement does not match the active loop. |
 | `FOR WITHOUT NEXT` | The ROM could not find a closing `NEXT`. |

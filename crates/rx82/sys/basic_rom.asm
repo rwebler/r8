@@ -71,6 +71,21 @@ LONG_50:
     bne DIM_DISPATCH_NEXT
     jmp DIM
 DIM_DISPATCH_NEXT:
+    ld cd, KW_DATA
+    call MATCH
+    bne DISPATCH_READ
+    ret
+DISPATCH_READ:
+    ld cd, KW_READ
+    call MATCH
+    bne DISPATCH_RESTORE
+    jmp READ_DATA
+DISPATCH_RESTORE:
+    ld cd, KW_RESTORE
+    call MATCH
+    bne DISPATCH_SAVE
+    jmp RESTORE_DATA
+DISPATCH_SAVE:
     ld cd, KW_SAVE
     call MATCH
     bne LONG_53
@@ -266,7 +281,7 @@ EDIT_COPY:
     beq LONG_191
     jmp EDIT_COPY
 LONG_191:
-    ret
+    jmp RESET_DATA
 ; Find smallest stored line greater than AB. Returns EF line, CD record.
 FIND_NEXT:
     push gh
@@ -2017,7 +2032,8 @@ HELP_TEXT:
     data "LET PRINT INPUT IF THEN GOTO GOSUB RETURN FOR TO STEP NEXT END", 0x0A
     data "A-Z variables, signed 16-bit integers, + - * / and parentheses", 0x0A
     data "DIM A(100): indices 0..100; 2048 array elements total", 0x0A
-    data "A$..Z$: 63 ASCII characters, + joins strings; LEN(A$) or LEN(A)", 0x0A, 0x00
+    data "A$..Z$: 63 ASCII characters, + joins strings; LEN(A$) or LEN(A)", 0x0A
+    data "DATA constants; READ A,A(I),A$; RESTORE [line]", 0x0A, 0x00
 
 ; Diagnostic handlers share stack reset, file abort, line context and prompt recovery.
 INVALID_LINE_NUMBER:
@@ -2377,7 +2393,7 @@ CLEAR_STRING_BYTE:
     inc cd
     cmp cd, 0x1000
     bne CLEAR_STRING_BYTE
-    ret
+    jmp RESET_DATA
 
 ; Look through leading parentheses, without consuming source. Z means numeric.
 ; Preserves CD/EF/GH; AB is scratch.
@@ -2670,3 +2686,280 @@ STRING_ARRAYS_UNSUPPORTED:
     jmp REPORT_ERROR
 STRING_ARRAYS_UNSUPPORTED_TEXT:
     data "? STRING ARRAYS NOT SUPPORTED", 0x00
+
+; DATA cursor: 00B4 last scanned line, 00B6 next item address (zero: scan).
+; 00B8 quoted flag; 00BA candidate next address, committed after assignment.
+KW_DATA:
+    data "DATA", 0x00
+KW_READ:
+    data "READ", 0x00
+KW_RESTORE:
+    data "RESTORE", 0x00
+RESET_DATA:
+    ld a, 0x00
+    ld 0x00B4, a
+    ld 0x00B5, a
+    ld 0x00B6, a
+    ld 0x00B7, a
+    ret
+RESTORE_DATA:
+    call SPACE
+    cmp a, 0x00
+    bne RESTORE_LINE
+    jmp RESET_DATA
+RESTORE_LINE:
+    cmp a, 0x30
+    bcs RESTORE_DIGIT
+    jmp INVALID_LINE_NUMBER
+RESTORE_DIGIT:
+    cmp a, 0x3A
+    bcc RESTORE_NUMBER
+    jmp INVALID_LINE_NUMBER
+RESTORE_NUMBER:
+    call NUMBER
+    cmp ab, 0x0000
+    bne RESTORE_NONZERO
+    jmp INVALID_LINE_NUMBER
+RESTORE_NONZERO:
+    push ab
+    call EOL
+    pop ab
+    dec ab
+    call FIND_NEXT
+    cmp cd, 0x0000
+    bne RESTORE_FOUND
+    jmp UNDEFINED_LINE
+RESTORE_FOUND:
+    inc ab
+    cmp ab, ef
+    beq RESTORE_EXACT
+    jmp UNDEFINED_LINE
+RESTORE_EXACT:
+    dec ab
+    ld 0x00B4, b
+    ld 0x00B5, a
+    ld a, 0x00
+    ld 0x00B6, a
+    ld 0x00B7, a
+    ret
+
+READ_DATA:
+    call IS_STRING
+    beq READ_INTEGER
+    call STRING_VARIABLE
+    push cd
+    call READ_TARGET_END
+    push gh
+    call DATA_ITEM
+    pop gh
+    pop ef
+    ld cd, 0x0F80
+    call COPY_STRING
+    jmp READ_COMMIT
+READ_INTEGER:
+    call LOCATION
+    push cd
+    call READ_TARGET_END
+    push gh
+    call DATA_ITEM
+    call DATA_INTEGER
+    pop gh
+    pop cd
+    ld (cd), b
+    ld (cd+0x01), a
+READ_COMMIT:
+    ld cd, 0x00BA
+    ld a, (cd)
+    ld 0x00B6, a
+    ld a, (cd+0x01)
+    ld 0x00B7, a
+    call SPACE
+    cmp a, 0x2C
+    beq READ_ANOTHER
+    ret
+READ_ANOTHER:
+    inc gh
+    jmp READ_DATA
+READ_TARGET_END:
+    call SPACE
+    cmp a, 0x2C
+    beq READ_TARGET_OK
+    cmp a, 0x00
+    beq READ_TARGET_OK
+    jmp SYNTAX_ERROR
+READ_TARGET_OK:
+    ret
+
+; Locate the next DATA item, retaining its address until READ succeeds.
+DATA_ITEM:
+    ld cd, 0x00B6
+    ld h, (cd)
+    ld g, (cd+0x01)
+    cmp gh, 0x0000
+    beq DATA_SCAN
+    jmp DATA_PARSE
+DATA_SCAN:
+    ld cd, 0x00B4
+    ld b, (cd)
+    ld a, (cd+0x01)
+    call FIND_NEXT
+    cmp cd, 0x0000
+    bne DATA_SCAN_LINE
+    jmp OUT_OF_DATA
+DATA_SCAN_LINE:
+    ld 0x00B4, f
+    ld 0x00B5, e
+    ld gh, cd
+    inc gh
+    inc gh
+    call SPACE
+    ld cd, KW_DATA
+    call MATCH
+    bne DATA_SCAN
+    ld 0x00B6, h
+    ld 0x00B7, g
+DATA_PARSE:
+    ld a, 0x00
+    ld 0x00B8, a
+    call SPACE
+    cmp a, 0x22
+    bne DATA_UNQUOTED
+    ld a, 0x01
+    ld 0x00B8, a
+    ld ef, 0x0F80
+    inc gh
+DATA_QUOTED_BYTE:
+    ld a, (gh)
+    inc gh
+    cmp a, 0x00
+    bne DATA_QUOTED_NOT_END
+    jmp UNTERMINATED_STRING
+DATA_QUOTED_NOT_END:
+    cmp a, 0x22
+    beq DATA_QUOTED_END
+    call STRING_APPEND
+    jmp DATA_QUOTED_BYTE
+DATA_QUOTED_END:
+    call SPACE
+    jmp DATA_SEPARATOR
+DATA_UNQUOTED:
+    push gh
+    ld cd, gh
+DATA_UNQUOTED_SCAN:
+    ld a, (gh)
+    cmp a, 0x00
+    beq DATA_UNQUOTED_END
+    cmp a, 0x2C
+    beq DATA_UNQUOTED_END
+    cmp a, 0x22
+    bne DATA_NOT_QUOTE
+    jmp INVALID_DATA
+DATA_NOT_QUOTE:
+    cmp a, 0x3A
+    bne DATA_NOT_COLON
+    jmp INVALID_DATA
+DATA_NOT_COLON:
+    inc gh
+    cmp a, 0x20
+    beq DATA_UNQUOTED_SCAN
+    cmp a, 0x09
+    beq DATA_UNQUOTED_SCAN
+    ld cd, gh
+    jmp DATA_UNQUOTED_SCAN
+DATA_UNQUOTED_END:
+    ld ef, gh
+    pop gh
+    cmp gh, cd
+    bne DATA_UNQUOTED_NONEMPTY
+    jmp INVALID_DATA
+DATA_UNQUOTED_NONEMPTY:
+    push ef
+    ld ef, 0x0F80
+DATA_UNQUOTED_COPY:
+    ld a, (gh)
+    call STRING_APPEND
+    inc gh
+    cmp gh, cd
+    bne DATA_UNQUOTED_COPY
+    pop gh
+    ld a, (gh)
+DATA_SEPARATOR:
+    ld (ef), 0x00
+    cmp a, 0x00
+    beq DATA_LINE_DONE
+    cmp a, 0x2C
+    beq DATA_NEXT_ITEM
+    jmp INVALID_DATA
+DATA_NEXT_ITEM:
+    inc gh
+    ld 0x00BA, h
+    ld 0x00BB, g
+    ret
+DATA_LINE_DONE:
+    ld a, 0x00
+    ld 0x00BA, a
+    ld 0x00BB, a
+    ret
+
+; Strict signed decimal constants only: no variable lookup or expressions.
+DATA_INTEGER:
+    ld cd, 0x00B8
+    ld a, (cd)
+    cmp a, 0x00
+    beq DATA_INTEGER_UNQUOTED
+    jmp TYPE_MISMATCH
+DATA_INTEGER_UNQUOTED:
+    ld gh, 0x0F80
+    ld c, 0x00
+    ld a, (gh)
+    cmp a, 0x2D
+    bne DATA_INTEGER_PLUS
+    ld c, 0x01
+    inc gh
+    jmp DATA_INTEGER_DIGITS
+DATA_INTEGER_PLUS:
+    cmp a, 0x2B
+    bne DATA_INTEGER_DIGITS
+    inc gh
+DATA_INTEGER_DIGITS:
+    ld a, (gh)
+    cmp a, 0x30
+    bcs DATA_INTEGER_DIGIT
+    jmp TYPE_MISMATCH
+DATA_INTEGER_DIGIT:
+    cmp a, 0x3A
+    bcc DATA_INTEGER_NUMBER
+    jmp TYPE_MISMATCH
+DATA_INTEGER_NUMBER:
+    call NUMBER
+    push ab
+    ld a, (gh)
+    cmp a, 0x00
+    beq DATA_INTEGER_END
+    jmp TYPE_MISMATCH
+DATA_INTEGER_END:
+    pop ab
+    cmp c, 0x00
+    bne DATA_INTEGER_NEGATIVE
+    cmp ab, 0x8000
+    bcc DATA_INTEGER_RETURN
+    jmp OVERFLOW
+DATA_INTEGER_NEGATIVE:
+    cmp ab, 0x8000
+    bcc DATA_INTEGER_NEGATE
+    beq DATA_INTEGER_NEGATE
+    jmp OVERFLOW
+DATA_INTEGER_NEGATE:
+    jmp NEGATE
+DATA_INTEGER_RETURN:
+    ret
+OUT_OF_DATA:
+    ld cd, OUT_OF_DATA_TEXT
+    jmp REPORT_ERROR
+OUT_OF_DATA_TEXT:
+    data "? OUT OF DATA", 0x00
+INVALID_DATA:
+    ld cd, INVALID_DATA_TEXT
+    jmp REPORT_ERROR
+INVALID_DATA_TEXT:
+    data "? INVALID DATA", 0x00
