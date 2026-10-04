@@ -511,6 +511,19 @@ mod tests {
             .run(&mut b"".as_slice(), &mut reference_output)
             .unwrap();
         assert_eq!(reference_output, b"Saved text\n");
+        let (_, data_output) = session(&format!(
+            "10 READ A$\n20 PRINT A$\n30 END\n100 DATA \"Saved, data\",7\nSAVE \"{filename}\"\nREAD N$\nLOAD \"{filename}\"\nREAD N$,N\nPRINT N$,N\nRUN\nQUIT\n"
+        ));
+        assert!(data_output.contains("Saved, data\t7\n"), "{data_output}");
+        assert!(data_output.contains("> Saved, data\n"), "{data_output}");
+        let data_source = std::fs::read_to_string(&path).unwrap();
+        assert!(data_source.contains("100 DATA \"Saved, data\",7\n"));
+        reference.load(&data_source).unwrap();
+        reference_output.clear();
+        reference
+            .run(&mut b"".as_slice(), &mut reference_output)
+            .unwrap();
+        assert_eq!(reference_output, b"Saved, data\n");
         let (_, loaded) = session(&format!(
             "DIM A(0)\nA(0)=99\nA$=\"old\"\nLOAD \"{filename}\"\nPRINT LEN(A$)\nPRINT A(0)\nDIM A(2047)\nPRINT A(2047)\nQUIT\n"
         ));
@@ -521,13 +534,14 @@ mod tests {
         for malformed in ["10 PRINT 8\nnot numbered", "0 END", "65536 END", "10 \0"] {
             std::fs::write(&path, malformed).unwrap();
             let (sys, failure_output) = session(&format!(
-                "10 PRINT 7\nA=42\nDIM B(0)\nB(0)=99\nA$=\"kept\"\nLOAD \"{filename}\"\nPRINT A\nPRINT B(0)\nPRINT A$\nRUN\nQUIT\n"
+                "10 PRINT 7\n100 DATA 5,6\nREAD D\nA=42\nDIM B(0)\nB(0)=99\nA$=\"kept\"\nLOAD \"{filename}\"\nREAD D\nPRINT D\nPRINT A\nPRINT B(0)\nPRINT A$\nRUN\nQUIT\n"
             ));
             assert!(
                 failure_output.contains("? ")
                     && failure_output.contains("> 42\n")
                     && failure_output.contains("> 99\n")
                     && failure_output.contains("> kept\n")
+                    && failure_output.contains("> 6\n")
                     && failure_output.contains("> 7\n"),
                 "{failure_output}"
             );

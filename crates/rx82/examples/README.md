@@ -14,7 +14,8 @@ otherwise agree.
 | Program | What it exercises | Expected result |
 | :--- | :--- | :--- |
 | [countdown.bas](countdown.bas) | Negative `STEP` | 10, 8, 6, 4, 2, 0, then `Lift off!` |
-| [sort.bas](sort.bas) | `DIM`, indexed assignment, nested loops, `GOSUB` | Sorts six integers into 1, 2, 3, 5, 7, 9 |
+| [sort.bas](sort.bas) | `DATA`/`READ`, `DIM`, indexed assignment, nested loops, `GOSUB` | Sorts six integers into 1, 2, 3, 5, 7, 9 |
+| [data_table.bas](data_table.bas) | Mixed string/integer `DATA`, array `READ`, `RESTORE` | Loads 12 values, reports total 243 and target 240 |
 | [greeting.bas](greeting.bas) | String `INPUT`, concatenation, comparison, `LEN` for strings and arrays | Input Ada produces `Hello, Ada!`, length 11, 4 array elements, last square 9 |
 | [squares.bas](squares.bas) | `INPUT`, multiplication, `FOR` | Input 5 produces squares 1, 4, 9, 16, 25 |
 | [fibonacci.bas](fibonacci.bas) | Assignments, addition, loop state | Terms 0 through 15, ending at 610 |
@@ -103,3 +104,8 @@ For strings, start `greeting.bas` with `--native --break-before-run`. Enter
 `G`, then `I Ada` and `G` to answer its prompt. `M 0A80` shows G$ as
 `Hello, Ada!` in the ASCII column; `M 0C40` shows N$ as `Ada`. `M 9000`
 shows the four array elements `0, 1, 4, 9` as little-endian words.
+
+Run `data_table.bas` with `--native --break-before-run`, then enter `G` and
+`M 9000`. The first array words are `0C 00 0F 00 12 00` (12, 15, 18);
+all twelve values came from the two numeric DATA lines. `I RESTORE 310`, `G`,
+`I READ B`, `G`, `I PRINT B`, and `G` reread and print the first value, 12.

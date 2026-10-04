@@ -11,6 +11,8 @@ use std::io::{BufRead, Write};
 /// BASIC program storage, signed 16-bit integers, arrays, and ASCII strings.
 #[derive(Default)]
 pub struct Basic {
+    data_line: u16,
+    data_offset: Option<usize>,
     arrays: BTreeMap<String, Vec<i16>>,
     strings: BTreeMap<String, String>,
     lines: BTreeMap<u16, String>,
@@ -65,7 +67,12 @@ fn lex(source: &str) -> Result<Vec<Token>> {
             }
             let word = value.to_ascii_uppercase();
             let remark = word == "REM";
+            let data = word == "DATA";
             tokens.push(Token::Word(word));
+            if data {
+                tokens.push(Token::Text(chars.collect()));
+                break;
+            }
             if remark {
                 break;
             }
@@ -97,6 +104,48 @@ fn check_string(value: &str) -> Result<()> {
         "invalid string character"
     );
     Ok(())
+}
+
+fn data_body(source: &str) -> Option<&str> {
+    let source = source.trim_start();
+    if !source.get(..4)?.eq_ignore_ascii_case("DATA") {
+        return None;
+    }
+    let body = source.get(4..)?;
+    if body.starts_with(|character: char| character.is_ascii_alphanumeric() || character == '$') {
+        return None;
+    }
+    Some(body)
+}
+
+#[expect(
+    clippy::single_call_fn,
+    reason = "keep DATA field parsing separate from cursor traversal"
+)]
+fn data_constant(source: &str) -> Result<(String, bool, Option<usize>)> {
+    let trimmed = source.trim_start_matches([' ', '\t']);
+    let (value, quoted, rest) = if let Some(text) = trimmed.strip_prefix('"') {
+        let (text, rest) = text.split_once('"').context("unterminated string")?;
+        (text, true, rest.trim_start_matches([' ', '\t']))
+    } else {
+        let end = trimmed.find(',').unwrap_or(trimmed.len());
+        let text = trimmed
+            .get(..end)
+            .context("invalid DATA")?
+            .trim_end_matches([' ', '\t']);
+        ensure!(
+            !text.is_empty() && !text.contains(['"', ':']),
+            "invalid DATA"
+        );
+        (text, false, trimmed.get(end..).context("invalid DATA")?)
+    };
+    let next = if rest.is_empty() {
+        None
+    } else {
+        ensure!(rest.starts_with(','), "invalid DATA");
+        Some(source.len().saturating_sub(rest.len()).saturating_add(1))
+    };
+    Ok((value.to_owned(), quoted, next))
 }
 
 impl Parser<'_> {
@@ -321,6 +370,85 @@ fn loop_pairs(program: &BTreeMap<u16, Vec<Token>>) -> Result<BTreeMap<u16, u16>>
 }
 
 impl Basic {
+    fn reset_data(&mut self) {
+        self.data_line = 0;
+        self.data_offset = None;
+    }
+    fn data_item(&mut self) -> Result<(String, bool, Option<usize>)> {
+        if self.data_offset.is_none() {
+            let (&line, _) = self
+                .lines
+                .range((
+                    core::ops::Bound::Excluded(self.data_line),
+                    core::ops::Bound::Unbounded,
+                ))
+                .find(|&(_, body)| data_body(body).is_some())
+                .context("out of DATA")?;
+            self.data_line = line;
+            self.data_offset = Some(0);
+        }
+        let offset = self.data_offset.context("out of DATA")?;
+        let body = self
+            .lines
+            .get(&self.data_line)
+            .and_then(|body| data_body(body))
+            .context("out of DATA")?;
+        let (value, quoted, next) = data_constant(body.get(offset..).context("invalid DATA")?)?;
+        check_string(&value)?;
+        Ok((value, quoted, next.map(|next| offset.saturating_add(next))))
+    }
+    fn read_data(&mut self, tokens: &[Token]) -> Result<Flow> {
+        let mut pos = 0;
+        loop {
+            let mut parser = Parser {
+                tokens,
+                pos,
+                vars: &self.vars,
+                arrays: &self.arrays,
+                strings: &self.strings,
+            };
+            let Some(Token::Word(name)) = parser.next() else {
+                bail!("expected variable");
+            };
+            let string = name.ends_with('$');
+            let index = if string {
+                None
+            } else {
+                parser.subscript(&name)?
+            };
+            let more = parser.symbol(',');
+            if !more {
+                parser.end()?;
+            }
+            pos = parser.pos;
+            let (text, quoted, next) = self.data_item()?;
+            if string {
+                check_string(&text)?;
+                self.strings.insert(name, text);
+            } else {
+                ensure!(!quoted, "type mismatch");
+                let digits = text.strip_prefix(['+', '-']).unwrap_or(&text);
+                ensure!(
+                    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()),
+                    "type mismatch"
+                );
+                let value = text.parse::<i16>().context("integer overflow")?;
+                if let Some(index) = index {
+                    *self
+                        .arrays
+                        .get_mut(&name)
+                        .and_then(|array| array.get_mut(index))
+                        .context("subscript out of range")? = value;
+                } else {
+                    self.vars.insert(name, value);
+                }
+            }
+            self.data_offset = next;
+            if !more {
+                return Ok(Flow::Next);
+            }
+        }
+    }
     /// Loads numbered source lines, replacing the program and clearing variables
     /// and arrays only on success, including string variables.
     /// # Errors
@@ -334,6 +462,7 @@ impl Basic {
         self.vars.clear();
         self.arrays.clear();
         self.strings.clear();
+        self.reset_data();
         Ok(())
     }
     fn edit(&mut self, source: &str) -> Result<bool> {
@@ -350,6 +479,7 @@ impl Basic {
         } else {
             self.lines.insert(number, body.to_owned());
         }
+        self.reset_data();
         Ok(true)
     }
     fn statement(
@@ -365,6 +495,29 @@ impl Basic {
             arrays: &self.arrays,
             strings: &self.strings,
         };
+        if parser.word("DATA") {
+            return Ok(Flow::Next);
+        }
+        if parser.word("READ") {
+            return self.read_data(tokens.get(parser.pos..).context("expected variable")?);
+        }
+        if parser.word("RESTORE") {
+            let line = if parser.pos == tokens.len() {
+                0
+            } else {
+                let Some(Token::Number(number)) = parser.next() else {
+                    bail!("invalid line number");
+                };
+                let line = u16::try_from(number).context("invalid line number")?;
+                ensure!(line != 0, "invalid line number");
+                parser.end()?;
+                ensure!(self.lines.contains_key(&line), "undefined line {line}");
+                line.saturating_sub(1)
+            };
+            self.data_line = line;
+            self.data_offset = None;
+            return Ok(Flow::Next);
+        }
         if parser.word("DIM") {
             let Some(Token::Word(name)) = parser.next() else {
                 bail!("expected array name");
@@ -582,6 +735,7 @@ impl Basic {
         self.vars.clear();
         self.arrays.clear();
         self.strings.clear();
+        self.reset_data();
         let program: BTreeMap<u16, Vec<Token>> = self
             .lines
             .iter()
@@ -740,6 +894,7 @@ impl Basic {
                 self.vars.clear();
                 self.arrays.clear();
                 self.strings.clear();
+                self.reset_data();
                 return Ok(());
             }
             "LIST" => {
@@ -756,6 +911,10 @@ impl Basic {
                 writeln!(
                     output,
                     "Strings: name$, 63 ASCII characters, + joins strings; LEN(name$) or LEN(array)"
+                )?;
+                writeln!(
+                    output,
+                    "DATA constants; READ variable[,variable...]; RESTORE [line]"
                 )?;
                 return Ok(());
             }
@@ -869,6 +1028,31 @@ mod tests {
         assert_eq!(basic.strings.get("A$").map(String::as_str), Some("kept"));
         basic.load("10 END").unwrap();
         assert!(basic.strings.is_empty());
+    }
+
+    #[test]
+    fn data_cursor_resets_only_after_a_successful_load() {
+        let mut basic = Basic::default();
+        let mut output = Vec::new();
+        basic.load("100 DATA 5,6").unwrap();
+        basic
+            .command("READ A", &mut "".as_bytes(), &mut output)
+            .unwrap();
+        assert!(basic.load("invalid source").is_err());
+        basic
+            .command("READ B", &mut "".as_bytes(), &mut output)
+            .unwrap();
+        basic
+            .command("PRINT A,B", &mut "".as_bytes(), &mut output)
+            .unwrap();
+        basic.load("100 DATA 5,6").unwrap();
+        basic
+            .command("READ C", &mut "".as_bytes(), &mut output)
+            .unwrap();
+        basic
+            .command("PRINT C", &mut "".as_bytes(), &mut output)
+            .unwrap();
+        assert_eq!(output, b"5\t6\n5\n");
     }
 
     #[test]

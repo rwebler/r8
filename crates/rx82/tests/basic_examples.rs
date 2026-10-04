@@ -173,3 +173,13 @@ fn greeting_with_an_empty_name() {
         &[(b'I', 7)],
     );
 }
+
+#[test]
+fn data_table() {
+    check_example(
+        include_str!("../examples/data_table.bas"),
+        "",
+        "Monthly units\nCount: 12\nTotal: 243\nTarget: 240\n",
+        &[(b'I', 12), (b'S', 243), (b'V', 240)],
+    );
+}
