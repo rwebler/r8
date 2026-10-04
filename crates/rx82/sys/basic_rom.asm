@@ -11,6 +11,7 @@
 BOOT:
     ld sp, 0xBFFF
     call NEW_PROGRAM
+    call CLEAR_VARS
     ld cd, BANNER
     call PUTS
 PROMPT:
@@ -63,6 +64,11 @@ LONG_47:
     bne LONG_50
     jmp HELP
 LONG_50:
+    ld cd, KW_DIM
+    call MATCH
+    bne DIM_DISPATCH_NEXT
+    jmp DIM
+DIM_DISPATCH_NEXT:
     ld cd, KW_SAVE
     call MATCH
     bne LONG_53
@@ -194,7 +200,7 @@ CLEAR_VAR:
     beq LONG_141
     jmp CLEAR_VAR
 LONG_141:
-    ret
+    jmp CLEAR_ARRAYS
 ; AB line number, GH body. Find matching slot or first empty slot.
 EDIT:
     push ab
@@ -407,7 +413,7 @@ GOTO_STORE:
     ld 0x0081, a
     ret
 ASSIGN:
-    call VARIABLE
+    call LOCATION
     push cd
     call SPACE
     cmp a, 0x3D
@@ -586,7 +592,7 @@ LONG_448:
 LONG_451:
     ret
 VALUE_VAR:
-    call VARIABLE
+    call LOCATION
     ld b, (cd)
     ld a, (cd+0x01)
     ret
@@ -1359,7 +1365,7 @@ LONG_1048:
     ld 0x0093, e
     ret
 INPUT:
-    call VARIABLE
+    call LOCATION
     push cd
     call EOL
     ld a, 0x3F
@@ -1970,7 +1976,8 @@ KW_HELP:
 HELP_TEXT:
     data "RX-82 native ROM: numbered lines; LIST RUN NEW SAVE LOAD QUIT", 0x0A
     data "LET PRINT INPUT IF THEN GOTO GOSUB RETURN FOR TO STEP NEXT END", 0x0A
-    data "A-Z variables, signed 16-bit integers, + - * / and parentheses", 0x0A, 0x00
+    data "A-Z variables, signed 16-bit integers, + - * / and parentheses", 0x0A
+    data "DIM A(100): indices 0..100; 2048 array elements total", 0x0A, 0x00
 
 ; Diagnostic handlers share stack reset, file abort, line context and prompt recovery.
 INVALID_LINE_NUMBER:
@@ -2137,3 +2144,175 @@ BAD_INPUT_CHARACTER_TEXT:
     data "? INVALID CHARACTER", 0x00
 INPUT_TOO_LONG_TEXT:
     data "? LINE TOO LONG", 0x00
+
+; Arrays: 26 descriptors at 0800..0867 (base word, inclusive upper word).
+; Elements occupy 9000..9FFF, little endian. 00B0 holds the next free byte.
+CLEAR_ARRAYS:
+    ld cd, 0x0800
+    ld a, 0x00
+CLEAR_ARRAY_DESCRIPTOR:
+    ld (cd), a
+    inc cd
+    cmp cd, 0x0868
+    bne CLEAR_ARRAY_DESCRIPTOR
+    ld ab, 0x9000
+    ld 0x00B0, b
+    ld 0x00B1, a
+    ret
+; Convert scalar variable address CD to the corresponding array descriptor.
+ARRAY_DESCRIPTOR:
+    push ab
+    ld ab, cd
+    sec
+    sub ab, 0x0300
+    clc
+    add ab, ab
+    clc
+    add ab, 0x0800
+    ld cd, ab
+    pop ab
+    ret
+; Parse a scalar or array element location into CD. GH advances past subscript.
+LOCATION:
+    call VARIABLE
+    push ef
+    push cd
+    call SPACE
+    pop cd
+    cmp a, 0x28
+    beq LOCATION_ARRAY
+    pop ef
+    ret
+LOCATION_ARRAY:
+    call ARRAY_DESCRIPTOR
+    push cd
+    inc gh
+    call EXPR
+    push ab
+    call SPACE
+    cmp a, 0x29
+    beq LOCATION_CLOSE
+    jmp EXPECTED_RPAREN
+LOCATION_CLOSE:
+    inc gh
+    pop ab
+    pop cd
+    ld f, (cd)
+    ld e, (cd+0x01)
+    cmp ef, 0x0000
+    bne LOCATION_DIMENSIONED
+    jmp ARRAY_NOT_DIMENSIONED
+LOCATION_DIMENSIONED:
+    cmp a, 0x80
+    bcc LOCATION_NONNEGATIVE
+    jmp BAD_SUBSCRIPT
+LOCATION_NONNEGATIVE:
+    push ef
+    ld f, (cd+0x02)
+    ld e, (cd+0x03)
+    cmp ab, ef
+    bcc LOCATION_IN_RANGE
+    beq LOCATION_IN_RANGE
+    jmp BAD_SUBSCRIPT
+LOCATION_IN_RANGE:
+    pop ef
+    clc
+    add ab, ab
+    clc
+    add ef, ab
+    ld cd, ef
+    pop ef
+    ret
+DIM:
+    call VARIABLE
+    push cd
+    call SPACE
+    cmp a, 0x28
+    beq DIM_OPEN
+    jmp EXPECTED_LPAREN
+DIM_OPEN:
+    inc gh
+    call EXPR
+    push ab
+    call SPACE
+    cmp a, 0x29
+    beq DIM_CLOSE
+    jmp EXPECTED_RPAREN
+DIM_CLOSE:
+    inc gh
+    call EOL
+    pop ab
+    pop cd
+    cmp a, 0x80
+    bcc DIM_NONNEGATIVE
+    jmp BAD_SUBSCRIPT
+DIM_NONNEGATIVE:
+    call ARRAY_DESCRIPTOR
+    ld f, (cd)
+    ld e, (cd+0x01)
+    cmp ef, 0x0000
+    beq DIM_UNALLOCATED
+    jmp ARRAY_ALREADY_DIMENSIONED
+DIM_UNALLOCATED:
+    cmp ab, 0x0800
+    bcc DIM_SIZE_OK
+    jmp ARRAY_MEMORY_FULL
+DIM_SIZE_OK:
+    push gh
+    push ab
+    inc ab
+    clc
+    add ab, ab
+    ld gh, 0x00B0
+    ld f, (gh)
+    ld e, (gh+0x01)
+    ld gh, ef
+    clc
+    add ef, ab
+    cmp ef, 0xA000
+    bcc DIM_FITS
+    beq DIM_FITS
+    jmp ARRAY_MEMORY_FULL
+DIM_FITS:
+    pop ab
+    ld (cd), h
+    ld (cd+0x01), g
+    ld (cd+0x02), b
+    ld (cd+0x03), a
+    ld 0x00B0, f
+    ld 0x00B1, e
+    ld a, 0x00
+DIM_CLEAR:
+    ld (gh), a
+    inc gh
+    cmp gh, ef
+    bne DIM_CLEAR
+    pop gh
+    ret
+KW_DIM:
+    data "DIM", 0x00
+ARRAY_NOT_DIMENSIONED:
+    ld cd, ARRAY_NOT_DIMENSIONED_TEXT
+    jmp REPORT_ERROR
+ARRAY_NOT_DIMENSIONED_TEXT:
+    data "? ARRAY NOT DIMENSIONED", 0x00
+ARRAY_ALREADY_DIMENSIONED:
+    ld cd, ARRAY_ALREADY_DIMENSIONED_TEXT
+    jmp REPORT_ERROR
+ARRAY_ALREADY_DIMENSIONED_TEXT:
+    data "? ARRAY ALREADY DIMENSIONED", 0x00
+BAD_SUBSCRIPT:
+    ld cd, BAD_SUBSCRIPT_TEXT
+    jmp REPORT_ERROR
+BAD_SUBSCRIPT_TEXT:
+    data "? SUBSCRIPT OUT OF RANGE", 0x00
+ARRAY_MEMORY_FULL:
+    ld cd, ARRAY_MEMORY_FULL_TEXT
+    jmp REPORT_ERROR
+ARRAY_MEMORY_FULL_TEXT:
+    data "? ARRAY MEMORY FULL", 0x00
+EXPECTED_LPAREN:
+    ld cd, EXPECTED_LPAREN_TEXT
+    jmp REPORT_ERROR
+EXPECTED_LPAREN_TEXT:
+    data "? EXPECTED (", 0x00

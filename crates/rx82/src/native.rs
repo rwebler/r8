@@ -182,6 +182,54 @@ mod tests {
         (sys, output)
     }
     #[test]
+    fn native_arrays_live_in_ram_and_support_nested_indices() {
+        let (sys, output) = session(
+            "DIM A(100)\nA=7\nA(0)=100\nINPUT A(A(0))\n-32768\nLET A(1)=A(100)+2\nPRINT A,A(2),A(100),A(1)\nQUIT\n",
+        );
+        assert!(output.contains("7\t0\t-32768\t-32766\n"), "{output}");
+        for (address, expected) in [
+            (0x0800, 0x9000),
+            (0x0802, 100),
+            (0x9000, 100),
+            (0x9002, 0x8002),
+            (0x90C8, 0x8000),
+            (0x0300, 7),
+        ] {
+            assert_eq!(
+                u16::from_le_bytes([sys.mem.get(address), sys.mem.get(address.strict_add(1))]),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn native_array_errors_recover_without_consuming_storage() {
+        let (_, output) = session(
+            "PRINT A(0)\nA(0)=1\nDIM A(-1)\nDIM A(2048)\nDIM A(2046)\nDIM A(0)\nA(-1)=3\nPRINT A(2047)\nDIM B(1)\nDIM B(0)\nB(0)=42\nPRINT A(2046),B(0)\nQUIT\n",
+        );
+        for cause in [
+            "ARRAY NOT DIMENSIONED",
+            "SUBSCRIPT OUT OF RANGE",
+            "ARRAY ALREADY DIMENSIONED",
+            "ARRAY MEMORY FULL",
+        ] {
+            assert!(output.contains(cause), "{output}");
+        }
+        assert!(output.contains("0\t42\n"), "{output}");
+    }
+
+    #[test]
+    fn native_arrays_reset_on_run_and_new() {
+        let (_, output) = session(
+            "10 DIM A(0)\n20 PRINT A(0)\n30 A(0)=42\nRUN\nRUN\nNEW\nPRINT A(0)\nDIM A(2047)\nA(2047)=123\nPRINT A(2047)\nQUIT\n",
+        );
+        assert_eq!(output.matches("> 0\n").count(), 2, "{output}");
+        assert!(output.contains("ARRAY NOT DIMENSIONED"), "{output}");
+        assert!(output.contains("> 123\n"), "{output}");
+        assert!(!output.contains("ARRAY MEMORY FULL"), "{output}");
+    }
+
+    #[test]
     fn monitor_inspection_preserves_native_startup() {
         let (sys, shared) = machine();
         shared.borrow_mut().input.extend(b"10 A=42\nRUN\nQUIT\n");
@@ -451,14 +499,21 @@ mod tests {
             .run(&mut b"".as_slice(), &mut reference_output)
             .unwrap();
         assert_eq!(reference_output, b"7\n");
+        let (_, loaded) = session(&format!(
+            "DIM A(0)\nA(0)=99\nLOAD \"{filename}\"\nPRINT A(0)\nDIM A(2047)\nPRINT A(2047)\nQUIT\n"
+        ));
+        assert!(loaded.contains("ARRAY NOT DIMENSIONED"), "{loaded}");
+        assert!(loaded.contains("> 0\n"), "{loaded}");
+        assert!(!loaded.contains("ARRAY MEMORY FULL"), "{loaded}");
         for malformed in ["10 PRINT 8\nnot numbered", "0 END", "65536 END", "10 \0"] {
             std::fs::write(&path, malformed).unwrap();
             let (sys, failure_output) = session(&format!(
-                "10 PRINT 7\nA=42\nLOAD \"{filename}\"\nPRINT A\nRUN\nQUIT\n"
+                "10 PRINT 7\nA=42\nDIM B(0)\nB(0)=99\nLOAD \"{filename}\"\nPRINT A\nPRINT B(0)\nRUN\nQUIT\n"
             ));
             assert!(
                 failure_output.contains("? ")
                     && failure_output.contains("> 42\n")
+                    && failure_output.contains("> 99\n")
                     && failure_output.contains("> 7\n"),
                 "{failure_output}"
             );
