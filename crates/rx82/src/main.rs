@@ -24,6 +24,9 @@ enum Command {
     },
     /// Start BASIC, or run a numbered BASIC source file.
     Basic {
+        /// Load native BASIC source and pause in the monitor before RUN.
+        #[clap(long, requires = "native")]
+        break_before_run: bool,
         /// Run the native R8 ROM interpreter.
         #[clap(long)]
         native: bool,
@@ -82,14 +85,20 @@ enum DocCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Basic { native, path, step } => {
+        Command::Basic {
+            break_before_run,
+            native,
+            path,
+            step,
+        } => {
             if native {
                 let source = path.map(fs::read_to_string).transpose()?;
-                if step {
+                if step || break_before_run {
                     return rx82::native::debug(
                         source.as_deref().ok_or_else(|| {
-                            anyhow::anyhow!("--step requires a BASIC source file")
+                            anyhow::anyhow!("native debugging requires a BASIC source file")
                         })?,
+                        break_before_run,
                     );
                 }
                 return rx82::native::interact(

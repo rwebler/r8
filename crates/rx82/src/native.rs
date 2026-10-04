@@ -91,20 +91,68 @@ pub fn interact(
     Ok(())
 }
 
-/// Opens the monitor with a source file queued as guest keyboard input.
+/// Prepares a native debugging session, optionally loading before the first stop.
+/// The source is always consumed by guest ROM instructions, never copied into records.
 /// # Errors
-/// Returns monitor I/O errors.
-pub fn debug(source: &str) -> Result<()> {
-    let (sys, shared) = machine();
+/// Returns an error if preloading does not reach an input boundary within its budget.
+pub fn debug_monitor(source: &str, break_before_run: bool) -> Result<crate::monitor::Monitor> {
+    if break_before_run {
+        anyhow::ensure!(
+            source.lines().all(|line| {
+                let line = line.trim();
+                line.is_empty() || line.as_bytes().first().is_some_and(u8::is_ascii_digit)
+            }),
+            "pause-before-RUN requires a file of numbered BASIC lines"
+        );
+    }
+    let (mut sys, shared) = machine();
     shared
         .borrow_mut()
         .input
-        .extend(source.bytes().chain(b"\nRUN\n".iter().copied()));
-    shared.borrow_mut().eof = true;
-    let mut monitor = crate::monitor::Monitor {
+        .extend(source.bytes().chain(*b"\n"));
+    if break_before_run {
+        let mut ready = false;
+        for _ in 0..20_000_000_u32 {
+            sys.tick();
+            if sys.cpu.state == crate::state::State::FetchOpcode && shared.borrow().waiting {
+                ready = true;
+                break;
+            }
+            anyhow::ensure!(!sys.cpu.halt, "guest halted before loading completed");
+        }
+        anyhow::ensure!(
+            ready,
+            "guest did not finish loading within 20 million cycles"
+        );
+    }
+    if break_before_run {
+        anyhow::ensure!(
+            !shared
+                .borrow()
+                .output
+                .windows(2)
+                .any(|bytes| bytes == b"? "),
+            "the BASIC ROM rejected the source while loading: {}",
+            String::from_utf8_lossy(&shared.borrow().output)
+        );
+    }
+    shared.borrow_mut().input.extend(b"RUN\n");
+    shared.borrow_mut().waiting = false;
+    Ok(crate::monitor::Monitor {
+        console: Some(shared),
         sys,
         ..Default::default()
-    };
+    })
+}
+
+/// Opens the monitor at boot or after loading, with RUN queued for continuation.
+/// # Errors
+/// Returns guest preparation or terminal I/O errors.
+pub fn debug(source: &str, break_before_run: bool) -> Result<()> {
+    let mut monitor = debug_monitor(source, break_before_run)?;
+    if break_before_run {
+        println!("BASIC source loaded; paused before RUN. Use M 1000, then G.");
+    }
     monitor.interact_at_current_pc()
 }
 
@@ -139,10 +187,47 @@ mod tests {
         monitor.sys.debug_print();
         monitor.memory(Some(0x1000));
         assert_eq!(monitor.sys.cpu.pc, 0xC000);
-        monitor.step(None);
-        monitor.go(None);
+        monitor.step(None).unwrap();
+        monitor.go(None).unwrap();
         assert_eq!(monitor.sys.mem.get(0x0300), 42);
         assert_eq!(monitor.sys.mem.get(0x1000), 10);
+    }
+
+    #[test]
+    fn debugger_pauses_with_source_loaded_before_any_program_statement() {
+        use crate::monitor::StopReason;
+        let mut monitor = debug_monitor("10 A=42\n20 PRINT A\n30 END", true).unwrap();
+        assert_eq!(monitor.sys.mem.get(0x1000), 10);
+        assert_eq!(monitor.sys.mem.get(0x1002), b'A');
+        assert_eq!(monitor.sys.mem.get(0x0300), 0);
+        assert_eq!(monitor.sys.mem.get(0x0082), 0);
+        let mut output = Vec::new();
+        assert_eq!(
+            monitor.run_with_output(None, &mut output).unwrap(),
+            StopReason::WaitingForInput
+        );
+        assert_eq!(monitor.sys.mem.get(0x0300), 42);
+        assert!(String::from_utf8(output).unwrap().contains("42\n"));
+    }
+
+    #[test]
+    fn debugger_delivers_output_and_guest_input() {
+        let mut monitor = debug_monitor("10 INPUT A\n20 PRINT A\n30 END", true).unwrap();
+        let mut output = Vec::new();
+        monitor
+            .interact_with(&mut b"G\nI 7\nG\nI QUIT\nG\nQ\n".as_slice(), &mut output)
+            .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("Guest waiting for input"), "{text}");
+        assert!(text.contains("7\n> Guest waiting"), "{text}");
+        assert!(text.contains("Halted."), "{text}");
+        assert_eq!(monitor.sys.mem.get(0x0300), 7);
+    }
+
+    #[test]
+    fn preload_rejects_commands_and_invalid_numbered_source() {
+        assert!(debug_monitor("10 A=42\nRUN", true).is_err());
+        assert!(debug_monitor("0 PRINT 1", true).is_err());
     }
 
     #[test]
