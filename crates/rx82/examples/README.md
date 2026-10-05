@@ -16,6 +16,7 @@ otherwise agree.
 | [countdown.bas](countdown.bas) | Negative `STEP` | 10, 8, 6, 4, 2, 0, then `Lift off!` |
 | [sort.bas](sort.bas) | `DATA`/`READ`, `DIM`, indexed assignment, nested loops, `GOSUB` | Sorts six integers into 1, 2, 3, 5, 7, 9 |
 | [data_table.bas](data_table.bas) | Mixed string/integer `DATA`, array `READ`, `RESTORE` | Loads 12 values, reports total 243 and target 240 |
+| [memory.bas](memory.bas) | `POKE`, `PEEK`, computed addresses | Writes squares 0–49 to bytes 256–263 and reads them back |
 | [greeting.bas](greeting.bas) | String `INPUT`, concatenation, comparison, `LEN` for strings and arrays | Input Ada produces `Hello, Ada!`, length 11, 4 array elements, last square 9 |
 | [squares.bas](squares.bas) | `INPUT`, multiplication, `FOR` | Input 5 produces squares 1, 4, 9, 16, 25 |
 | [fibonacci.bas](fibonacci.bas) | Assignments, addition, loop state | Terms 0 through 15, ending at 610 |
@@ -109,3 +110,7 @@ Run `data_table.bas` with `--native --break-before-run`, then enter `G` and
 `M 9000`. The first array words are `0C 00 0F 00 12 00` (12, 15, 18);
 all twelve values came from the two numeric DATA lines. `I RESTORE 310`, `G`,
 `I READ B`, `G`, `I PRINT B`, and `G` reread and print the first value, 12.
+
+For `memory.bas`, run with `--native --break-before-run`, enter `G`, then
+`M 0100`. The first eight bytes should be `00 01 04 09 10 19 24 31`.
+This example also works in reference mode, using its separate byte memory.
