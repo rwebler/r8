@@ -182,6 +182,107 @@ mod tests {
         (sys, output)
     }
     #[test]
+    fn native_division_matches_checked_signed_results() {
+        let values = [
+            i16::MIN,
+            -30000,
+            -257,
+            -256,
+            -181,
+            -7,
+            -3,
+            -2,
+            -1,
+            0,
+            1,
+            2,
+            3,
+            7,
+            127,
+            181,
+            255,
+            256,
+            257,
+            30000,
+            i16::MAX,
+        ];
+        for left in values {
+            for right in values {
+                let (result, cycles) = divide_routine(left, right, false);
+                let expected = if right == 0 {
+                    Err("division by zero")
+                } else {
+                    left.checked_div(right).ok_or("integer overflow")
+                };
+                assert_eq!(result, expected, "{left} / {right}");
+                assert!(cycles < 3000, "{left} / {right} took {cycles} cycles");
+            }
+        }
+    }
+
+    #[test]
+    fn native_division_cycle_regression() {
+        for (left, right) in [(30000, 1), (i16::MIN, 1), (30000, 7), (i16::MIN, -1)] {
+            let (old_result, old_cycles) = divide_routine(left, right, true);
+            let (new_result, new_cycles) = divide_routine(left, right, false);
+            assert_eq!(new_result, old_result);
+            assert!(
+                new_cycles.strict_mul(4) < old_cycles,
+                "{left} / {right}: {old_cycles} -> {new_cycles} cycles"
+            );
+            println!("{left} / {right}: {old_cycles} -> {new_cycles} R8 cycles");
+        }
+    }
+
+    fn divide_routine(left: i16, right: i16, legacy: bool) -> (Result<i16, &'static str>, u32) {
+        use r8cpu::regs::Reg::{AB, CD, GH, SP};
+        let (_, arithmetic) = include_str!("../sys/basic_rom.asm")
+            .split_once("NEGATE:\n")
+            .unwrap();
+        let (helpers, _) = arithmetic.split_once("MUL_SIGNED:\n").unwrap();
+        let (_, division) = arithmetic.split_once("DIV_SIGNED:\n").unwrap();
+        let (division, _) = division.split_once("OVERFLOW:\n").unwrap();
+        // Preserve the old algorithm as an isolated cycle-count baseline.
+        let division = if legacy {
+            "    push cd\n    cmp ef, 0x0000\n    bne LEGACY_DIVIDE\n    jmp DIV_ZERO\nLEGACY_DIVIDE:\n    call MAGNITUDES\n    ld cd, 0x0000\nDIV_LOOP:\n    cmp ab, ef\n    bcs LEGACY_SUBTRACT\n    jmp DIV_DONE\nLEGACY_SUBTRACT:\n    sec\n    sub ab, ef\n    inc cd\n    jmp DIV_LOOP\nDIV_DONE:\n    ld ab, cd\n    call MAG_RESULT\n    pop cd\n    ret\n"
+        } else {
+            division
+        };
+        let code = r8asm::assemble(&format!(
+            "ld sp, 0xBFFF\nld ab, 0x{:04X}\nld ef, 0x{:04X}\nld cd, 0x1357\nld gh, 0x2468\ncall DIV_SIGNED\nhalt\nNEGATE:\n{helpers}\nDIV_SIGNED:\n{division}\nOVERFLOW:\nld gh, 0xFFFF\nhalt\nDIV_ZERO:\nld gh, 0xFFFE\nhalt",
+            u16::from_le_bytes(left.to_le_bytes()), u16::from_le_bytes(right.to_le_bytes())
+        )).unwrap();
+        let mut sys = System {
+            turbo: true,
+            ..System::default()
+        };
+        sys.mem.load(0x0100, &code).unwrap();
+        sys.cpu.pc = 0x0100;
+        let mut cycles = 0_u32;
+        while !sys.cpu.halt && cycles < 2_000_000 {
+            sys.tick();
+            cycles = cycles.strict_add(1);
+        }
+        assert!(sys.cpu.halt, "division timed out");
+        match sys.cpu.regs.get16(GH) {
+            0xFFFF => return (Err("integer overflow"), cycles),
+            0xFFFE => return (Err("division by zero"), cycles),
+            _ => {}
+        }
+        assert_eq!(sys.cpu.regs.get16(CD), 0x1357, "CD was not preserved");
+        assert_eq!(
+            sys.cpu.regs.get16(GH),
+            0x2468,
+            "source pointer was not preserved"
+        );
+        assert_eq!(sys.cpu.regs.get16(SP), 0xBFFF, "unbalanced stack");
+        (
+            Ok(i16::from_le_bytes(sys.cpu.regs.get16(AB).to_le_bytes())),
+            cycles,
+        )
+    }
+
+    #[test]
     fn native_multiplication_matches_checked_signed_results() {
         let values = [
             i16::MIN,

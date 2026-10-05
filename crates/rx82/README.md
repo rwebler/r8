@@ -374,11 +374,19 @@ record. ROM source is `sys/basic_rom.asm`; rebuild its checked-in image with
 agreement, ROM size, output, and guest RAM contents.
 
 Native multiplication uses `LSR` and conditional addition to process at most
-16 multiplier bits, while retaining checked signed 16-bit results. Its tests
-cover signed boundary cases and compare R8 cycle counts with the former
-repeated-addition routine. Run the isolated arithmetic comparison with
-`cargo test -p rx82 native_multiplication_cycle_regression -- --nocapture`;
-these counts include the test harness and arithmetic helpers, but exclude
+16 multiplier bits. Division aligns the divisor with at most 15 doublings,
+then uses `LSR` and conditional subtraction to process at most 16 quotient
+bits. Signed results, truncation toward zero, overflow checks, and division
+by zero errors are preserved. Tests cover signed boundary cases and compare
+R8 cycle counts with the former repeated-addition and repeated-subtraction
+routines. Run the isolated comparisons with:
+
+```sh
+cargo test -p rx82 native_multiplication_cycle_regression -- --nocapture
+cargo test -p rx82 native_division_cycle_regression -- --nocapture
+```
+
+These counts include the test harness and arithmetic helpers, but exclude
 BASIC parsing and printing.
 
 The native DATA cursor uses little-endian words at `00B4` (last scanned line)
