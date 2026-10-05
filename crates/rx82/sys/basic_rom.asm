@@ -796,19 +796,37 @@ DIV_SIGNED:
     jmp DIV_ZERO
 LONG_583:
     call MAGNITUDES
+    push gh
     ld cd, 0x0000
+    ld gh, 0x0001
+    cmp ab, ef
+    bcc DIV_DONE
+DIV_ALIGN:
+    ; Magnitudes are at most 8000. Doubling a smaller divisor cannot wrap.
+    cmp ef, ab
+    bcs DIV_LOOP
+    clc
+    add ef, ef
+    clc
+    add gh, gh
+    jmp DIV_ALIGN
 DIV_LOOP:
     cmp ab, ef
-    bcs LONG_588
-    jmp DIV_DONE
-LONG_588:
+    bcc DIV_SHIFT
     sec
     sub ab, ef
-    inc cd
-    jmp DIV_LOOP
+    clc
+    add cd, gh
+DIV_SHIFT:
+    ; Descend through at most 16 quotient bits, retaining the remainder in AB.
+    lsr ef, 0x01
+    lsr gh, 0x01
+    cmp gh, 0x0000
+    bne DIV_LOOP
 DIV_DONE:
     ld ab, cd
     call MAG_RESULT
+    pop gh
     pop cd
     ret
 OVERFLOW:
