@@ -86,6 +86,11 @@ DISPATCH_RESTORE:
     bne DISPATCH_SAVE
     jmp RESTORE_DATA
 DISPATCH_SAVE:
+    ld cd, KW_POKE
+    call MATCH
+    bne DISPATCH_AFTER_POKE
+    jmp POKE_BYTE
+DISPATCH_AFTER_POKE:
     ld cd, KW_SAVE
     call MATCH
     bne LONG_53
@@ -606,6 +611,11 @@ VALUE_VAR:
     bne VALUE_NOT_LEN
     jmp LENGTH
 VALUE_NOT_LEN:
+    ld cd, KW_PEEK
+    call MATCH
+    bne VALUE_NOT_PEEK
+    jmp PEEK_BYTE
+VALUE_NOT_PEEK:
     call IS_STRING
     beq VALUE_INTEGER
     jmp TYPE_MISMATCH
@@ -2033,7 +2043,8 @@ HELP_TEXT:
     data "A-Z variables, signed 16-bit integers, + - * / and parentheses", 0x0A
     data "DIM A(100): indices 0..100; 2048 array elements total", 0x0A
     data "A$..Z$: 63 ASCII characters, + joins strings; LEN(A$) or LEN(A)", 0x0A
-    data "DATA constants; READ A,A(I),A$; RESTORE [line]", 0x0A, 0x00
+    data "DATA constants; READ A,A(I),A$; RESTORE [line]", 0x0A
+    data "PEEK(address), POKE address,byte: RX-82 RAM, ROM and devices", 0x0A, 0x00
 
 ; Diagnostic handlers share stack reset, file abort, line context and prompt recovery.
 INVALID_LINE_NUMBER:
@@ -2963,3 +2974,85 @@ INVALID_DATA:
     jmp REPORT_ERROR
 INVALID_DATA_TEXT:
     data "? INVALID DATA", 0x00
+
+; Memory addresses accept a bare unsigned literal or the bits of a signed
+; expression. Literal lookahead only parses source; bus reads happen once.
+KW_PEEK:
+    data "PEEK", 0x00
+KW_POKE:
+    data "POKE", 0x00
+MEM_ADDRESS:
+    call SPACE
+    push gh
+    cmp a, 0x30
+    bcs MEM_ADDRESS_DIGIT
+    jmp MEM_ADDRESS_EXPR
+MEM_ADDRESS_DIGIT:
+    cmp a, 0x3A
+    bcc MEM_ADDRESS_LITERAL
+    jmp MEM_ADDRESS_EXPR
+MEM_ADDRESS_LITERAL:
+    call NUMBER
+    push ab
+    call SPACE
+    ld c, a
+    pop ab
+    cmp c, 0x2C
+    beq MEM_ADDRESS_DONE
+    cmp c, 0x29
+    beq MEM_ADDRESS_DONE
+MEM_ADDRESS_EXPR:
+    pop gh
+    jmp EXPR
+MEM_ADDRESS_DONE:
+    pop cd
+    ret
+PEEK_BYTE:
+    call SPACE
+    cmp a, 0x28
+    beq PEEK_BYTE_OPEN
+    jmp EXPECTED_LPAREN
+PEEK_BYTE_OPEN:
+    inc gh
+    call MEM_ADDRESS
+    push ab
+    call SPACE
+    cmp a, 0x29
+    beq PEEK_BYTE_READ
+    jmp EXPECTED_RPAREN
+PEEK_BYTE_READ:
+    inc gh
+    pop cd
+    ld b, (cd)
+    ld a, 0x00
+    ret
+POKE_BYTE:
+    call MEM_ADDRESS
+    push ab
+    call SPACE
+    cmp a, 0x2C
+    beq POKE_BYTE_VALUE
+    jmp EXPECTED_COMMA
+POKE_BYTE_VALUE:
+    inc gh
+    call EXPR
+    cmp a, 0x00
+    beq POKE_BYTE_VALID
+    jmp BYTE_OUT_OF_RANGE
+POKE_BYTE_VALID:
+    push ab
+    call EOL
+    pop ab
+    pop cd
+    ld (cd), b
+    ret
+EXPECTED_COMMA:
+    ld cd, EXPECTED_COMMA_TEXT
+    jmp REPORT_ERROR
+EXPECTED_COMMA_TEXT:
+    data "? EXPECTED COMMA", 0x00
+BYTE_OUT_OF_RANGE:
+    ld cd, BYTE_OUT_OF_RANGE_TEXT
+    jmp REPORT_ERROR
+BYTE_OUT_OF_RANGE_TEXT:
+    data "? BYTE OUT OF RANGE", 0x00

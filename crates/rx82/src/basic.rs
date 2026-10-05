@@ -11,6 +11,8 @@ use std::io::{BufRead, Write};
 /// BASIC program storage, signed 16-bit integers, arrays, and ASCII strings.
 #[derive(Default)]
 pub struct Basic {
+    // Reference-only byte memory; native BASIC uses the RX-82 bus instead.
+    memory: BTreeMap<u16, u8>,
     data_line: u16,
     data_offset: Option<usize>,
     arrays: BTreeMap<String, Vec<i16>>,
@@ -88,6 +90,7 @@ fn lex(source: &str) -> Result<Vec<Token>> {
 }
 
 struct Parser<'source> {
+    memory: &'source BTreeMap<u16, u8>,
     tokens: &'source [Token],
     pos: usize,
     vars: &'source BTreeMap<String, i16>,
@@ -246,6 +249,20 @@ impl Parser<'_> {
         ensure!(index < array.len(), "subscript out of range");
         Ok(Some(index))
     }
+    fn address(&mut self) -> Result<u16> {
+        // A bare unsigned literal reaches the whole address space. Computed
+        // addresses retain ordinary signed arithmetic and use the resulting bits.
+        if let Some(Token::Number(number)) = self.tokens.get(self.pos).cloned()
+            && matches!(
+                self.tokens.get(self.pos.saturating_add(1)),
+                Some(Token::Symbol(',' | ')'))
+            )
+        {
+            self.pos = self.pos.saturating_add(1);
+            return u16::try_from(number).context("integer overflow");
+        }
+        Ok(u16::from_le_bytes(self.expression()?.to_le_bytes()))
+    }
     fn expression(&mut self) -> Result<i16> {
         self.binary(0)
     }
@@ -253,6 +270,12 @@ impl Parser<'_> {
         let mut left = match self.next().context("expected expression")? {
             Token::Number(n) => i16::try_from(n).context("integer out of range")?,
             Token::Word(name) if name == "LEN" => self.length()?,
+            Token::Word(name) if name == "PEEK" => {
+                ensure!(self.symbol('('), "expected (");
+                let address = self.address()?;
+                ensure!(self.symbol(')'), "expected )");
+                i16::from(self.memory.get(&address).copied().unwrap_or_default())
+            }
             Token::Word(name) => {
                 ensure!(!name.ends_with('$'), "type mismatch");
                 if let Some(index) = self.subscript(&name)? {
@@ -401,6 +424,7 @@ impl Basic {
         let mut pos = 0;
         loop {
             let mut parser = Parser {
+                memory: &self.memory,
                 tokens,
                 pos,
                 vars: &self.vars,
@@ -489,12 +513,21 @@ impl Basic {
         output: &mut impl Write,
     ) -> Result<Flow> {
         let mut parser = Parser {
+            memory: &self.memory,
             tokens,
             pos: 0,
             vars: &self.vars,
             arrays: &self.arrays,
             strings: &self.strings,
         };
+        if parser.word("POKE") {
+            let address = parser.address()?;
+            ensure!(parser.symbol(','), "expected comma");
+            let value = u8::try_from(parser.expression()?).context("byte out of range")?;
+            parser.end()?;
+            self.memory.insert(address, value);
+            return Ok(Flow::Next);
+        }
         if parser.word("DATA") {
             return Ok(Flow::Next);
         }
@@ -916,6 +949,10 @@ impl Basic {
                     output,
                     "DATA constants; READ variable[,variable...]; RESTORE [line]"
                 )?;
+                writeln!(
+                    output,
+                    "PEEK(address), POKE address,byte: separate reference memory; use --native for RX-82 RAM and devices"
+                )?;
                 return Ok(());
             }
             _ => {}
@@ -964,6 +1001,53 @@ mod tests {
         let mut output = Vec::new();
         basic.run(&mut input.as_bytes(), &mut output)?;
         Ok(String::from_utf8(output)?)
+    }
+
+    #[test]
+    fn reference_memory_has_unsigned_bytes_and_signed_address_aliases() {
+        let mut basic = Basic::default();
+        let mut output = Vec::new();
+        basic.interact(&mut "PRINT PEEK(0),PEEK(65535)\nPOKE 65535,255\nPOKE -32768,128\nPRINT PEEK(-1),PEEK(32768)\nPOKE 256,42\nNEW\n10 PRINT PEEK(256)\nRUN\nQUIT\n".as_bytes(), &mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("0\t0\n"), "{output}");
+        assert!(output.contains("255\t128\n"), "{output}");
+        assert!(output.contains("> 42\n"), "{output}");
+        basic.load("10 PRINT PEEK(256)").unwrap();
+        let mut after_load = Vec::new();
+        basic.run(&mut "".as_bytes(), &mut after_load).unwrap();
+        assert_eq!(after_load, b"42\n");
+    }
+
+    #[test]
+    fn invalid_memory_operations_preserve_reference_bytes() {
+        for (statement, cause) in [
+            ("POKE 256,-1", "byte out of range"),
+            ("POKE 256,256", "byte out of range"),
+            ("POKE 256,1 2", "unexpected trailing input"),
+            ("POKE 256 1", "expected comma"),
+            ("POKE 65536,1", "integer overflow"),
+            ("PRINT PEEK(-32769)", "integer out of range"),
+            ("PRINT PEEK(65536)", "integer overflow"),
+            ("PRINT PEEK(256", "expected )"),
+            ("PRINT PEEK 256", "expected ("),
+        ] {
+            let mut basic = Basic::default();
+            let mut output = Vec::new();
+            basic
+                .command("POKE 256,42", &mut "".as_bytes(), &mut output)
+                .unwrap();
+            let error = basic
+                .command(statement, &mut "".as_bytes(), &mut output)
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains(cause),
+                "{statement}: {error:#}"
+            );
+            basic
+                .command("PRINT PEEK(256)", &mut "".as_bytes(), &mut output)
+                .unwrap();
+            assert_eq!(output, b"42\n");
+        }
     }
 
     #[test]

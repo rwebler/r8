@@ -109,6 +109,7 @@ The initial dialect supports:
   same type. Strings compare in case-sensitive ASCII order.
 - `FOR name = start TO limit [STEP step]` and `NEXT [name]` in stored programs.
 - `DATA` constants, `READ` into variables or array elements, and `RESTORE [line]`.
+- `PEEK(address)` reads a byte; `POKE address,value` writes a byte from 0 to 255.
 - `GOTO line`, `GOSUB line`, `RETURN`, `END`, `STOP`, and `REM` comments.
 
 Keywords and variable names are case-insensitive; names start with a letter and
@@ -202,6 +203,49 @@ its destination and leaves that item unread; assignments earlier in the same
 line. The [table example](examples/data_table.bas) demonstrates mixed data and
 `RESTORE`; [sorting](examples/sort.bas) now fills its array from `DATA`.
 
+### PEEK / POKE
+
+```basic
+10 POKE 256,42
+20 PRINT PEEK(256)
+30 POKE 257,PEEK(256)+1
+40 PRINT PEEK(257)
+```
+
+`PEEK` returns an integer from 0 to 255. `POKE` accepts integer expressions for
+the address and value, and rejects values outside 0–255 without writing.
+Addresses can be bare unsigned decimal literals from 0 to 65535. Computed
+addresses use normal checked signed 16-bit arithmetic, with negative results
+interpreted as address bit patterns: `-1` addresses 65535, and `-28672`
+addresses 36864 (`9000` hex). For example, use `P=-28672` then `PEEK(P+I)`
+to inspect successive bytes in the native array pool. A high unsigned literal
+is accepted directly (`PEEK(36864)`), but cannot be part of an arithmetic
+expression (`PEEK(36864+I)` overflows). Addresses in BASIC are decimal; monitor
+addresses are hexadecimal.
+
+With `--native`, both operations run as R8 loads/stores through the RX-82 bus.
+They access actual RAM, ROM, and memory-mapped devices. For example:
+
+```basic
+A=4660
+PRINT PEEK(768),PEEK(769)
+POKE 768,120
+PRINT A
+```
+
+This reads A's little-endian bytes (52 and 18), then changes A to 4728.
+`POKE 65282,65` writes `A` to the console output register. Reading the console
+input register with `PEEK(65281)` consumes one input byte. ROM writes have no
+effect. Writes to interpreter storage, source records, or the stack change the
+running machine and can disrupt it. The unused RAM at `0100`–`01FF` (decimal
+256–511) is suitable for small memory experiments; see [memory.bas](examples/memory.bas).
+
+The Rust reference interpreter provides its own zero-filled 64 KiB byte
+address space. It has no emulated CPU, ROM, devices, or BASIC variable mapping:
+`POKE 768,...` there does not change A. Reference bytes persist across `RUN`,
+`NEW`, and `LOAD`, until the interpreter session ends. In native mode these
+commands retain unused RAM but reset or replace their usual BASIC storage.
+
 ### FOR / NEXT loops
 
 ```basic
@@ -271,7 +315,7 @@ empty `I` sends a blank line. `Q` (or host EOF) exits the monitor; `I QUIT` then
 line numbers; see the monitor commands below.
 
 The native dialect supports `PRINT`, assignment (`LET` optional), integer and
-string `INPUT`, string concatenation, `LEN`, `DATA`/`READ`/`RESTORE`, one-dimensional integer arrays
+string `INPUT`, string concatenation, `LEN`, `DATA`/`READ`/`RESTORE`, `PEEK`/`POKE`, one-dimensional integer arrays
 declared with `DIM`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
 six comparisons with `IF ... THEN`, `GOTO`, `GOSUB`/`RETURN`, `FOR`/`NEXT` with
 `STEP`, `REM`, `END`/`STOP`, `LIST`, `RUN`, `NEW`, and `QUIT`. Bounds, step
@@ -351,6 +395,8 @@ The line suffix identifies the executing statement, not the missing target.
 | `STRING ARRAYS NOT SUPPORTED` | `DIM` currently declares integer arrays only. |
 | `OUT OF DATA` | No unread DATA items remain; add data or use `RESTORE`. |
 | `INVALID DATA` | A read encountered an empty field or malformed constant delimiter. |
+| `BYTE OUT OF RANGE` | The value given to `POKE` must be between 0 and 255. |
+| `EXPECTED COMMA` | Separate the `POKE` address and byte value with a comma. |
 | `NEXT WITHOUT FOR` | No active loop in this subroutine; enter through its `FOR`. |
 | `NEXT MISMATCH` | The variable or closing statement does not match the active loop. |
 | `FOR WITHOUT NEXT` | The ROM could not find a closing `NEXT`. |

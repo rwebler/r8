@@ -182,6 +182,52 @@ mod tests {
         (sys, output)
     }
     #[test]
+    fn native_peek_and_poke_access_variables_arrays_strings_and_source() {
+        let (sys, output) = session(
+            "10 PRINT 1\nA=4660\nDIM B(1)\nB(1)=1027\nC$=\"cat\"\nPRINT PEEK(768),PEEK(769),PEEK(36866),PEEK(4096),PEEK(4098)\nPOKE 768,120\nPOKE 36866,255\nPOKE 2432,98\nPOKE 4104,50\nPRINT A,B(1),C$\nRUN\nQUIT\n",
+        );
+        assert!(output.contains("52\t18\t3\t10\t80\n"), "{output}");
+        assert!(output.contains("4728\t1279\tbat\n"), "{output}");
+        assert!(output.contains("> 2\n"), "{output}");
+        assert_eq!(sys.mem.get(4104), b'2');
+    }
+
+    #[test]
+    fn native_memory_access_uses_devices_and_keeps_rom_read_only() {
+        let (_, output) = session(
+            "A=PEEK(49152)\nPOKE 49152,255\nPRINT A,PEEK(49152)\nPOKE 65535,0\nPRINT PEEK(65535),PEEK(-1)\nPOKE 65282,126\nPRINT PEEK(65281),PEEK(65281)\nABQUIT\n",
+        );
+        let first_byte = ROM.first().unwrap();
+        assert!(
+            output.contains(&format!("{first_byte}\t{first_byte}\n")),
+            "{output}"
+        );
+        assert!(output.contains("192\t192\n"), "{output}");
+        assert_eq!(output.matches('~').count(), 1, "{output}");
+        assert!(output.contains("65\t66\n"), "{output}");
+    }
+
+    #[test]
+    fn native_invalid_memory_operations_do_not_write_or_consume_input() {
+        for statement in [
+            "POKE 256,-1",
+            "POKE 256,256",
+            "POKE 256,1 2",
+            "POKE 256 1",
+            "POKE 65536,1",
+            "PRINT PEEK(65281",
+            "PRINT PEEK 256",
+        ] {
+            let (sys, output) = session(&format!(
+                "POKE 256,42\n{statement}\nPRINT PEEK(256)\nQUIT\n"
+            ));
+            assert!(output.contains("? "), "{statement}: {output}");
+            assert!(output.contains("> 42\n"), "{statement}: {output}");
+            assert_eq!(sys.mem.get(256), 42);
+        }
+    }
+
+    #[test]
     fn native_arrays_live_in_ram_and_support_nested_indices() {
         let (sys, output) = session(
             "DIM A(100)\nA=7\nA(0)=100\nINPUT A(A(0))\n-32768\nLET A(1)=A(100)+2\nPRINT A,A(2),A(100),A(1)\nQUIT\n",
@@ -315,6 +361,7 @@ mod tests {
     #[test]
     fn native_matches_reference_arithmetic_and_control_flow() {
         for source in [
+            "10 POKE 256,1\n20 POKE 257,200\n30 P=-28672\n40 POKE P+1,129\n50 PRINT PEEK(PEEK(256)+256),2*PEEK(P+1)+1,PEEK(36865)",
             "10 PRINT -32768,32767,2+3*4,(2+3)*4,-7/2,-3*-4",
             "10 FOR I=1 TO 2\n20 FOR J=2 TO 1 STEP -1\n30 PRINT I;J\n40 NEXT J\n50 NEXT I",
             "10 FOR I=2 TO 1\n20 PRINT 99\n30 NEXT I\n40 PRINT 7",

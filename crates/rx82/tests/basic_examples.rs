@@ -183,3 +183,13 @@ fn data_table() {
         &[(b'I', 12), (b'S', 243), (b'V', 240)],
     );
 }
+
+#[test]
+fn memory() {
+    check_example(
+        include_str!("../examples/memory.bas"),
+        "",
+        "256\t0\n257\t1\n258\t4\n259\t9\n260\t16\n261\t25\n262\t36\n263\t49\n",
+        &[(b'I', 8)],
+    );
+}
