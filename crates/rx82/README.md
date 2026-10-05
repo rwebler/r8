@@ -373,6 +373,14 @@ record. ROM source is `sys/basic_rom.asm`; rebuild its checked-in image with
 `cargo run -p rx82 -- asm crates/rx82/sys/basic_rom.asm`. Tests verify image/source
 agreement, ROM size, output, and guest RAM contents.
 
+Native multiplication uses `LSR` and conditional addition to process at most
+16 multiplier bits, while retaining checked signed 16-bit results. Its tests
+cover signed boundary cases and compare R8 cycle counts with the former
+repeated-addition routine. Run the isolated arithmetic comparison with
+`cargo test -p rx82 native_multiplication_cycle_regression -- --nocapture`;
+these counts include the test harness and arithmetic helpers, but exclude
+BASIC parsing and printing.
+
 The native DATA cursor uses little-endian words at `00B4` (last scanned line)
 and `00B6` (next item's source address; zero means search the next line).
 The ROM parses DATA directly from program records without a separate data copy.

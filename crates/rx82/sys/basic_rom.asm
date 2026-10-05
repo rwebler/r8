@@ -765,18 +765,25 @@ MUL_SIGNED:
     push cd
     call MAGNITUDES
     ld cd, 0x0000
-MUL_LOOP:
     cmp ab, 0x0000
-    bne LONG_569
-    jmp MUL_DONE
-LONG_569:
+    beq MUL_DONE
+MUL_LOOP:
+    ; Consume one multiplier bit; LSR puts that bit in carry.
+    lsr ab, 0x01
+    bcc MUL_SHIFT
     clc
     add cd, ef
-    bcc LONG_572
+    bcc MUL_SHIFT
     jmp OVERFLOW
-LONG_572:
-    dec ab
-    jmp MUL_LOOP
+MUL_SHIFT:
+    ; Do not double after the last bit: -32768 * 1 must remain valid.
+    cmp ab, 0x0000
+    beq MUL_DONE
+    clc
+    add ef, ef
+    bcc MUL_LOOP
+    ; Remaining multiplier bits make an overflowing shift a real overflow.
+    jmp OVERFLOW
 MUL_DONE:
     ld ab, cd
     call MAG_RESULT
