@@ -48,7 +48,23 @@ pub fn interact(
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<()> {
+    interact_with_devices(source, input, output, Vec::new())
+}
+
+/// Runs BASIC with optional devices attached ahead of the system ROM.
+///
+/// # Errors
+/// Returns host terminal I/O errors.
+pub fn interact_with_devices(
+    source: Option<&str>,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    devices: Vec<Box<dyn crate::system::Device>>,
+) -> Result<()> {
     let (mut sys, shared) = machine();
+    for device in devices.into_iter().rev() {
+        sys.devices.insert(0, device);
+    }
     if let Some(source) = source {
         shared
             .borrow_mut()

@@ -17,6 +17,7 @@ otherwise agree.
 | [sort.bas](sort.bas) | `DATA`/`READ`, `DIM`, indexed assignment, nested loops, `GOSUB` | Sorts six integers into 1, 2, 3, 5, 7, 9 |
 | [data_table.bas](data_table.bas) | Mixed string/integer `DATA`, array `READ`, `RESTORE` | Loads 12 values, reports total 243 and target 240 |
 | [memory.bas](memory.bas) | `POKE`, `PEEK`, computed addresses | Writes squares 0–49 to bytes 256–263 and reads them back |
+| [dice.bas](dice.bas) | Optional random device, `RANDOMIZE`, `RND` | Ten die rolls, each from 1 to 6; requires `--random-device` |
 | [greeting.bas](greeting.bas) | String `INPUT`, concatenation, comparison, `LEN` for strings and arrays | Input Ada produces `Hello, Ada!`, length 11, 4 array elements, last square 9 |
 | [squares.bas](squares.bas) | `INPUT`, multiplication, `FOR` | Input 5 produces squares 1, 4, 9, 16, 25 |
 | [fibonacci.bas](fibonacci.bas) | Assignments, addition, loop state | Terms 0 through 15, ending at 610 |
@@ -36,6 +37,17 @@ For input-driven examples, enter values when prompted or pipe them:
 printf '252\n105\n' | cargo run -p rx82 -- basic --native crates/rx82/examples/gcd.bas
 printf 'Ada\n' | cargo run -p rx82 -- basic --native crates/rx82/examples/greeting.bas
 ```
+
+## Dice and the optional random device
+
+The dice example needs the optional device:
+
+```sh
+cargo run -p rx82 -- basic --native --random-device crates/rx82/examples/dice.bas
+```
+
+Its `RANDOMIZE 42` makes the rolls repeat on each run. Replace that statement
+with bare `RANDOMIZE` to use a fresh seed. Both interpreters support the device.
 
 ## Inspect native execution
 
@@ -84,6 +96,7 @@ leaving the monitor. `Q` exits; `I QUIT` followed by `G` halts the guest.
 
 ```sh
 cargo test -p rx82 --test basic_examples
+cargo test -p rx82 --test basic_random
 ```
 
 These tests run the actual files through both interpreters, check their output

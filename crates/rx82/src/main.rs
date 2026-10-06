@@ -24,6 +24,8 @@ enum Command {
     },
     /// Start BASIC, or run a numbered BASIC source file.
     Basic {
+        #[clap(flatten)]
+        random: RandomOptions,
         /// Load native BASIC source and pause in the monitor before RUN.
         #[clap(long, requires = "native")]
         break_before_run: bool,
@@ -48,6 +50,8 @@ enum Command {
     },
     /// Start the interactive monitor.
     Mon {
+        #[clap(flatten)]
+        random: RandomOptions,
         /// Skip running boot ROM.
         #[clap(long)]
         skiprom: bool,
@@ -62,6 +66,8 @@ enum Command {
     },
     /// Assemble and run a program in the monitor.
     Run {
+        #[clap(flatten)]
+        random: RandomOptions,
         /// Skip running boot ROM.
         #[clap(long)]
         skiprom: bool,
@@ -82,6 +88,30 @@ enum DocCommand {
     Opcodes,
 }
 
+/// Optional hardware shared by BASIC, the monitor, and assembly programs.
+#[derive(Debug, clap::Args)]
+struct RandomOptions {
+    /// Plug in the random device at FF20..FF23.
+    #[clap(long)]
+    random_device: bool,
+    /// Initial 32-bit seed for repeatable random sequences (decimal).
+    #[clap(long, requires = "random_device")]
+    random_seed: Option<u32>,
+}
+
+impl RandomOptions {
+    fn device(&self) -> Result<Option<rx82::random::RandomDevice>> {
+        if !self.random_device {
+            return Ok(None);
+        }
+        Ok(Some(if let Some(seed) = self.random_seed {
+            rx82::random::RandomDevice::with_seed(seed)
+        } else {
+            rx82::random::RandomDevice::from_entropy()?
+        }))
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -90,24 +120,41 @@ fn main() -> Result<()> {
             native,
             path,
             step,
+            random,
         } => {
+            let random = random.device()?;
             if native {
                 let source = path.map(fs::read_to_string).transpose()?;
                 if step || break_before_run {
-                    return rx82::native::debug(
+                    let mut monitor = rx82::native::debug_monitor(
                         source.as_deref().ok_or_else(|| {
                             anyhow::anyhow!("native debugging requires a BASIC source file")
                         })?,
                         break_before_run,
-                    );
+                    )?;
+                    if let Some(device) = random {
+                        monitor.sys.devices.insert(0, Box::new(device));
+                    }
+                    if break_before_run {
+                        println!("BASIC source loaded; paused before RUN. Use M 1000, then G.");
+                    }
+                    return monitor.interact_at_current_pc();
                 }
-                return rx82::native::interact(
+                let mut devices: Vec<Box<dyn rx82::system::Device>> = Vec::new();
+                if let Some(device) = random {
+                    devices.push(Box::new(device));
+                }
+                return rx82::native::interact_with_devices(
                     source.as_deref(),
                     &mut std::io::stdin().lock(),
                     &mut std::io::stdout().lock(),
+                    devices,
                 );
             }
             let mut basic = rx82::basic::Basic::default();
+            if let Some(device) = random {
+                basic.attach_random(device);
+            }
             let mut input = std::io::stdin().lock();
             let mut output = std::io::stdout().lock();
             if let Some(path) = path {
@@ -142,6 +189,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Mon {
+            random,
             paths: maybe_paths,
             skiprom,
             step,
@@ -158,6 +206,9 @@ fn main() -> Result<()> {
             if !skiprom {
                 mon.sys.reset();
             }
+            if let Some(device) = random.device()? {
+                mon.sys.devices.insert(0, Box::new(device));
+            }
             mon.step = step;
             mon.sys.turbo = turbo;
             if programs.is_empty() {
@@ -170,6 +221,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Run {
+            random,
             paths,
             skiprom,
             step,
@@ -180,6 +232,9 @@ fn main() -> Result<()> {
                 let mut mon = Monitor::default();
                 if !skiprom {
                     mon.sys.reset();
+                }
+                if let Some(device) = random.device()? {
+                    mon.sys.devices.insert(0, Box::new(device));
                 }
                 mon.step = step;
                 mon.sys.turbo = turbo;
