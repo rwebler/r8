@@ -70,9 +70,9 @@ With Fibonacci instead, variable A at `0300` ends as `DB 03` (**987**), B and C
 as `3D 06` (**1597**), and I at `0310` as `10 00` (**16**). The last *printed*
 term is 610; assignments advance the state once more before the loop exits.
 
-Use `--step` instead of `--break-before-run` to stop at ROM entry (`C000`).
-Then `B C000`, `G`, and `S` demonstrate stopping before an instruction and
-stepping over it. `B` lists breakpoints, `BC C000` removes one, and `BC` clears
+Use `--step` instead of `--break-before-run` to stop at BASIC ROM entry (`D000`).
+Then `B D000`, `G`, and `S` demonstrate stopping before an instruction and
+stepping over it. `B` lists breakpoints, `BC D000` removes one, and `BC` clears
 all. Breakpoints use hexadecimal machine-code addresses, not BASIC line numbers.
 
 Guest output is displayed in monitor mode. For an input-driven example such as
