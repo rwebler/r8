@@ -287,7 +287,7 @@ factorials, a multiplication table, and Euclid's GCD algorithm.
 
 ## Native BASIC ROM
 
-`rx82 basic --native` boots an alternative ROM written in R8 assembly. The Rust
+`rx82 basic --native` enters an optional ROM module written in R8 assembly. The Rust
 interpreter remains the default/reference. Native parsing, line editing,
 variables, and statement execution happen on the emulated CPU; Rust only
 transports terminal bytes. `rx82 basic --native file.bas` types the file into
@@ -299,7 +299,7 @@ cargo run -p rx82 -- basic --native --step program.bas
 cargo run -p rx82 -- basic --native --break-before-run program.bas
 ```
 
-`--step` opens the monitor at ROM entry (`C000`), before the source is loaded.
+`--step` opens the monitor at BASIC ROM entry (`D000`), before the source is loaded.
 `--break-before-run` first lets the ROM consume the numbered source file, then
 opens the monitor with records loaded and `RUN` queued but not executed. Use
 `M 1000` to inspect source, `M 0300` to inspect variables, and `G` to continue.
@@ -356,8 +356,21 @@ immutable snapshot so the ROM's validation/install passes see identical bytes.
 Writes accumulate until close. Relative paths use the host working directory.
 The device is attached only to the native BASIC machine, before its ROM.
 
-Memory layout: console at `FF00`–`FF02`, code at `C000`–`FEFF`, reset vector at
-`FFFE`, line buffer at `0200`, little-endian variable words at `0300`–`0333`,
+The original `sys/rx82_rom.asm` and its binary remain unchanged. BASIC is a
+separate image mapped at `D000` in the system firmware's unused padding.
+`System::install_rom(start, data)` installs modules within `D000`–`FEFF`, rejecting
+overlapping modules, nonzero firmware bytes, and images outside that window.
+Only the image's actual bytes are mapped. `System::enter_rom(start)` initializes
+the CPU at an installed module's entry point, preserving RAM. The native BASIC
+frontend uses this interface directly; it does not run the stock boot sequence
+first. Ordinary `run` and `mon` machines have no BASIC module installed.
+The stock reset vector still points to `C000`; reset enters the system firmware,
+not BASIC. This is a fixed address expansion window, not bank switching or
+automatic firmware discovery. Modules must be assembled for their load address.
+
+Memory layout: console at `FF00`–`FF02`, BASIC code starting at `D000` (within
+`D000`–`FEFF`), original system ROM at `C000` and reset vector at `FFFE`,
+line buffer at `0200`, little-endian variable words at `0300`–`0333`,
 subroutine frames at `0400`–`04FF`, loop frames at `0500`–`07FF`,
 array descriptors at `0800`–`0867`, string slots at `0900`–`0F7F`,
 string expression buffers at `0F80`–`0FFF`, program records at `1000`–`8FFF`,
@@ -506,10 +519,10 @@ control returns to the monitor, so memory and console inspection see its result.
 For example, start native BASIC with `--step`, then use:
 
 ```text
-B C000
+B D000
 G
 S
-BC C000
+BC D000
 G
 ```
 

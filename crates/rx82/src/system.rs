@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, ensure};
 
 use core::fmt::Write as _;
 
@@ -38,7 +38,7 @@ pub struct Snapshot {
 /// turn, in this order:
 ///
 /// 1. CPU
-/// 2. Devices in the `devices` list, in order of decreasing priority.
+/// 2. Extension ROMs, then devices in decreasing priority.
 /// 3. Memory
 /// 4. Clock
 ///
@@ -67,6 +67,8 @@ pub struct System {
     pub history: Vec<Snapshot>,
     /// The system memory.
     pub mem: Memory,
+    /// Optional ROMs mapped over unused system firmware padding.
+    pub rom_modules: Vec<Rom>,
     /// Turbo (max clock speed) mode.
     pub turbo: bool,
 }
@@ -83,6 +85,7 @@ impl Default for System {
             devices: Vec::new(),
             history: Vec::new(),
             mem: Memory::default(),
+            rom_modules: Vec::new(),
             turbo: false,
         };
         let data = Vec::from(ROM_DATA);
@@ -132,6 +135,56 @@ impl System {
             self.peek_mem(self.cpu.pc.wrapping_add(2)),
         ];
         disassemble(&code)
+    }
+
+    /// Enters an installed module at its first instruction without changing RAM.
+    /// A subsequent CPU reset still enters the stock system firmware.
+    ///
+    /// # Errors
+    /// Returns an error if no module begins at this address.
+    pub fn enter_rom(&mut self, start: u16) -> Result<()> {
+        ensure!(
+            self.rom_modules.iter().any(|rom| rom.start == start),
+            "no ROM module at entry address"
+        );
+        self.cpu = Cpu::default();
+        self.cpu.pc = start;
+        self.bus = Bus::default();
+        Ok(())
+    }
+
+    /// Installs an extension in the firmware expansion window D000..FEFF.
+    /// The original firmware image and reset vector remain unchanged.
+    ///
+    /// # Errors
+    /// Rejects empty, overlapping, oversized images or nonzero firmware bytes.
+    pub fn install_rom(&mut self, start: u16, data: &[u8]) -> Result<()> {
+        ensure!(!data.is_empty(), "empty ROM module");
+        let end = usize::from(start)
+            .saturating_add(data.len())
+            .saturating_sub(1);
+        ensure!(
+            start >= 0xD000 && end <= 0xFEFF,
+            "ROM module outside D000..FEFF"
+        );
+        let end = u16::try_from(end)?;
+        ensure!(
+            self.rom_modules
+                .iter()
+                .all(|rom| end < rom.start || start > rom.end),
+            "ROM modules overlap"
+        );
+        ensure!(
+            (start..=end)
+                .all(|addr| ROM_DATA.get(usize::from(addr.strict_sub(0xC000))) == Some(&0)),
+            "ROM module overlaps system firmware"
+        );
+        self.rom_modules.push(Rom {
+            start,
+            end,
+            data: data.to_vec(),
+        });
+        Ok(())
     }
 
     /// Reads the contents of system memory at logical address `addr`.
@@ -216,6 +269,9 @@ impl System {
     pub fn tick(&mut self) {
         let state = self.cpu.state; // save before cpu.tick() overwrites it
         self.cpu.tick(&mut self.bus);
+        for rom in &mut self.rom_modules {
+            rom.tick(&mut self.bus);
+        }
         for device in &mut self.devices {
             device.tick(&mut self.bus);
         }
@@ -297,6 +353,55 @@ impl System {
 mod tests {
     use super::*;
     use r8cpu::instructions::InstructionKind::*;
+
+    #[test]
+    #[expect(clippy::unwrap_used, reason = "test")]
+    fn extension_rom_preserves_firmware_and_reset() {
+        let mut sys = System {
+            turbo: true,
+            ..System::default()
+        };
+        let module = r8asm::assemble_with_debug("org 0xD000\nld a, 0x2A\nhalt").unwrap();
+        sys.install_rom(0xD000, &module).unwrap();
+        for addr in 0xC000..=0xFFFF {
+            if !sys.rom_modules.iter().any(|rom| rom.in_range(addr)) {
+                assert_eq!(
+                    Some(sys.peek_mem(addr)),
+                    ROM_DATA.get(usize::from(addr.strict_sub(0xC000))).copied()
+                );
+            }
+        }
+        sys.enter_rom(0xD000).unwrap();
+        sys.run();
+        assert_eq!(sys.cpu.regs.get(A), 42);
+        sys.cpu.reset(&mut sys.bus);
+        while sys.cpu.state != State::FetchOpcode {
+            sys.tick();
+        }
+        assert_eq!(sys.cpu.pc, 0xC000);
+        sys.run();
+        assert_eq!(sys.cpu.regs.get16(SP), 0xBFFF);
+        sys.enter_rom(0xD000).unwrap();
+        sys.run();
+        assert_eq!(sys.cpu.regs.get(A), 42);
+    }
+
+    #[test]
+    #[expect(clippy::unwrap_used, reason = "test")]
+    fn extension_rom_validates_mappings_before_installing() {
+        let mut sys = System::default();
+        assert!(sys.install_rom(0xD000, &[]).is_err());
+        assert!(sys.install_rom(0xC000, &[0]).is_err());
+        assert!(sys.install_rom(0xFEFF, &[0, 0]).is_err());
+        assert!(sys.install_rom(0xFFFF, &[0]).is_err());
+        assert!(sys.enter_rom(0xD000).is_err());
+        sys.install_rom(0xD000, &[1, 2]).unwrap();
+        assert!(sys.install_rom(0xD001, &[3]).is_err());
+        sys.install_rom(0xD002, &[4]).unwrap();
+        assert_eq!(sys.rom_modules.len(), 2);
+        assert_eq!(sys.peek_mem(0xD001), 2);
+        assert_eq!(sys.peek_mem(0xD002), 4);
+    }
 
     #[test]
     fn trace_formatting_copes_with_long_lines() {

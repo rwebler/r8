@@ -2,7 +2,6 @@
 extern crate alloc;
 use crate::{
     console::{Console, ConsoleState},
-    rom::Rom,
     system::System,
 };
 use alloc::rc::Rc;
@@ -12,9 +11,18 @@ use std::io::{BufRead, Write};
 
 /// Native interpreter assembled from `sys/basic_rom.asm`.
 pub const ROM: &[u8] = include_bytes!("../sys/basic_rom.bin");
+/// Entry address of the optional BASIC extension ROM.
+pub const ROM_START: u16 = 0xD000;
 
-/// Creates a machine paused at the BASIC ROM entry point after CPU reset.
+/// Creates a machine paused at the BASIC extension entry point.
+///
+/// # Panics
+/// If the bundled module no longer fits in the firmware expansion window.
 #[must_use]
+#[expect(
+    clippy::expect_used,
+    reason = "bundled ROM layout is verified by tests"
+)]
 pub fn machine() -> (System, Rc<RefCell<ConsoleState>>) {
     let console = Console::default();
     let shared = Rc::clone(&console.shared);
@@ -22,25 +30,13 @@ pub fn machine() -> (System, Rc<RefCell<ConsoleState>>) {
         turbo: true,
         ..System::default()
     };
-    sys.devices.clear();
-    sys.devices.push(Box::new(console));
-    sys.devices.push(Box::<crate::files::FilePort>::default());
-    sys.devices.push(Box::new(Rom {
-        start: 0xC000,
-        end: 0xFEFF,
-        data: ROM.to_vec(),
-    }));
-    sys.devices.push(Box::new(Rom {
-        start: 0xFFFE,
-        end: 0xFFFF,
-        data: vec![0x00, 0xC0],
-    }));
-    sys.cpu.reset(&mut sys.bus);
-    // Monitor memory reads are safe at instruction boundaries. Complete the
-    // reset-vector fetch before exposing this machine to the debugger.
-    while sys.cpu.state != crate::state::State::FetchOpcode {
-        sys.tick();
-    }
+    sys.devices.insert(0, Box::new(console));
+    sys.devices
+        .insert(1, Box::<crate::files::FilePort>::default());
+    sys.install_rom(ROM_START, ROM)
+        .expect("valid BASIC ROM module");
+    sys.enter_rom(ROM_START)
+        .expect("installed BASIC ROM module");
     (sys, shared)
 }
 
@@ -388,7 +384,7 @@ mod tests {
     #[test]
     fn native_memory_access_uses_devices_and_keeps_rom_read_only() {
         let (_, output) = session(
-            "A=PEEK(49152)\nPOKE 49152,255\nPRINT A,PEEK(49152)\nPOKE 65535,0\nPRINT PEEK(65535),PEEK(-1)\nPOKE 65282,126\nPRINT PEEK(65281),PEEK(65281)\nABQUIT\n",
+            "A=PEEK(53248)\nPOKE 53248,255\nPRINT A,PEEK(53248)\nPOKE 65535,0\nPRINT PEEK(65535),PEEK(-1)\nPOKE 65282,126\nPRINT PEEK(65281),PEEK(65281)\nABQUIT\n",
         );
         let first_byte = ROM.first().unwrap();
         assert!(
@@ -469,6 +465,32 @@ mod tests {
     }
 
     #[test]
+    fn native_module_keeps_stock_firmware_and_reset_vector() {
+        let (mut sys, _) = machine();
+        for addr in 0xC000..0xD000 {
+            assert_eq!(
+                Some(sys.peek_mem(addr)),
+                crate::system::ROM_DATA
+                    .get(usize::from(addr.strict_sub(0xC000)))
+                    .copied()
+            );
+        }
+        assert_eq!(sys.peek_mem(0xFFFE), 0);
+        assert_eq!(sys.peek_mem(0xFFFF), 0xC0);
+        sys.cpu.reset(&mut sys.bus);
+        for _ in 0_u8..32 {
+            if sys.cpu.state == crate::state::State::FetchOpcode {
+                break;
+            }
+            sys.tick();
+        }
+        assert_eq!(sys.cpu.state, crate::state::State::FetchOpcode);
+        assert_eq!(sys.cpu.pc, 0xC000);
+        sys.enter_rom(ROM_START).unwrap();
+        assert_eq!(sys.cpu.pc, ROM_START);
+    }
+
+    #[test]
     fn monitor_inspection_preserves_native_startup() {
         let (sys, shared) = machine();
         shared.borrow_mut().input.extend(b"10 A=42\nRUN\nQUIT\n");
@@ -477,10 +499,10 @@ mod tests {
             sys,
             ..Default::default()
         };
-        assert_eq!(monitor.sys.cpu.pc, 0xC000);
+        assert_eq!(monitor.sys.cpu.pc, ROM_START);
         monitor.sys.debug_print();
         monitor.memory(Some(0x1000));
-        assert_eq!(monitor.sys.cpu.pc, 0xC000);
+        assert_eq!(monitor.sys.cpu.pc, ROM_START);
         monitor.step(None).unwrap();
         monitor.go(None).unwrap();
         assert_eq!(monitor.sys.mem.get(0x0300), 42);
@@ -530,7 +552,7 @@ mod tests {
             r8asm::assemble(include_str!("../sys/basic_rom.asm")).unwrap(),
             ROM
         );
-        assert!(ROM.len() <= 0x3F00);
+        assert!(ROM.len() <= 0x2F00);
     }
     #[test]
     fn native_editor_and_execution_use_guest_ram() {
@@ -542,7 +564,7 @@ mod tests {
         assert!(output.contains("42\n"), "{output}");
         assert_eq!(sys.mem.get(0x0300), 42);
         assert_eq!(sys.mem.get(0x1000), 20);
-        assert!(sys.cpu.pc >= 0xC000);
+        assert!(sys.cpu.pc >= ROM_START);
     }
     #[test]
     fn native_edit_delete_and_goto() {

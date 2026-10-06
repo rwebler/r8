@@ -9,7 +9,7 @@
 ; 9000..9FFF integer array elements; 00B0 array allocation pointer.
 ; 1000..8FFF: 256 records of 128 bytes: line word, NUL-terminated text.
 ; A zero line number marks a free record. Stack grows down from BFFF.
-    org 0xC000
+    org 0xD000
 BOOT:
     ld sp, 0xBFFF
     call NEW_PROGRAM

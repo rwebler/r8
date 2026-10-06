@@ -27,7 +27,10 @@ fn check_example(source: &str, input: &str, expected: &str, variables: &[(u8, i1
         sys.tick();
     }
     assert!(sys.cpu.halt, "guest timed out at {:04X}", sys.cpu.pc);
-    assert!(sys.cpu.pc >= 0xC000, "execution finished outside ROM");
+    assert!(
+        sys.cpu.pc >= native::ROM_START,
+        "execution finished outside BASIC ROM"
+    );
     let output = String::from_utf8(shared.borrow().output.clone()).unwrap();
     let (_, body) = output.split_once("BEGIN\n> ").unwrap();
     let (body, _) = body.split_once("> FINISH\n").unwrap();
