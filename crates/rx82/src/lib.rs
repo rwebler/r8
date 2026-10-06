@@ -10,6 +10,7 @@ pub mod files;
 pub mod memory;
 pub mod monitor;
 pub mod native;
+pub mod random;
 pub mod rom;
 pub mod state;
 pub mod system;

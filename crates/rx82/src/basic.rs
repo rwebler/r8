@@ -6,11 +6,13 @@
 extern crate alloc;
 use alloc::collections::BTreeMap;
 use anyhow::{Context as _, Result, bail, ensure};
+use core::cell::RefCell;
 use std::io::{BufRead, Write};
 
 /// BASIC program storage, signed 16-bit integers, arrays, and ASCII strings.
 #[derive(Default)]
 pub struct Basic {
+    random: RefCell<Option<crate::random::RandomDevice>>,
     // Reference-only byte memory; native BASIC uses the RX-82 bus instead.
     memory: BTreeMap<u16, u8>,
     data_line: u16,
@@ -90,6 +92,7 @@ fn lex(source: &str) -> Result<Vec<Token>> {
 }
 
 struct Parser<'source> {
+    random: &'source RefCell<Option<crate::random::RandomDevice>>,
     memory: &'source BTreeMap<u16, u8>,
     tokens: &'source [Token],
     pos: usize,
@@ -266,15 +269,61 @@ impl Parser<'_> {
     fn expression(&mut self) -> Result<i16> {
         self.binary(0)
     }
+    fn randomize(&mut self) -> Result<()> {
+        let seed = if self.pos == self.tokens.len() {
+            None
+        } else {
+            Some(u16::from_le_bytes(self.expression()?.to_le_bytes()))
+        };
+        self.end()?;
+        let mut random = self.random.borrow_mut();
+        let device = random.as_mut().context("random device not available")?;
+        if let Some(seed) = seed {
+            let [low, high] = seed.to_le_bytes();
+            device.write(0xFF22, low);
+            device.write(0xFF23, high);
+        } else {
+            device.randomize()?;
+        }
+        Ok(())
+    }
     fn binary(&mut self, min: u8) -> Result<i16> {
         let mut left = match self.next().context("expected expression")? {
             Token::Number(n) => i16::try_from(n).context("integer out of range")?,
             Token::Word(name) if name == "LEN" => self.length()?,
+            Token::Word(name) if name == "RND" => {
+                ensure!(self.symbol('('), "expected (");
+                let bound = self.expression()?;
+                ensure!(self.symbol(')'), "expected )");
+                ensure!(bound > 0, "invalid random bound");
+                let bound = u16::try_from(bound)?;
+                let limit = 0x8000_u16.strict_sub(
+                    0x8000_u16
+                        .checked_rem(bound)
+                        .context("invalid random bound")?,
+                );
+                let mut random = self.random.borrow_mut();
+                let device = random.as_mut().context("random device not available")?;
+                loop {
+                    let value = u16::from_be_bytes([device.next_byte() & 0x7F, device.next_byte()]);
+                    if value < limit {
+                        break i16::try_from(
+                            value.checked_rem(bound).context("invalid random bound")?,
+                        )?;
+                    }
+                }
+            }
             Token::Word(name) if name == "PEEK" => {
                 ensure!(self.symbol('('), "expected (");
                 let address = self.address()?;
                 ensure!(self.symbol(')'), "expected )");
-                i16::from(self.memory.get(&address).copied().unwrap_or_default())
+                let byte = self
+                    .random
+                    .borrow_mut()
+                    .as_mut()
+                    .and_then(|device| device.read(address))
+                    .unwrap_or_else(|| self.memory.get(&address).copied().unwrap_or_default());
+                i16::from(byte)
             }
             Token::Word(name) => {
                 ensure!(!name.ends_with('$'), "type mismatch");
@@ -393,6 +442,10 @@ fn loop_pairs(program: &BTreeMap<u16, Vec<Token>>) -> Result<BTreeMap<u16, u16>>
 }
 
 impl Basic {
+    /// Plugs a random device into the reference interpreter.
+    pub fn attach_random(&mut self, device: crate::random::RandomDevice) {
+        *self.random.get_mut() = Some(device);
+    }
     fn reset_data(&mut self) {
         self.data_line = 0;
         self.data_offset = None;
@@ -424,6 +477,7 @@ impl Basic {
         let mut pos = 0;
         loop {
             let mut parser = Parser {
+                random: &self.random,
                 memory: &self.memory,
                 tokens,
                 pos,
@@ -513,6 +567,7 @@ impl Basic {
         output: &mut impl Write,
     ) -> Result<Flow> {
         let mut parser = Parser {
+            random: &self.random,
             memory: &self.memory,
             tokens,
             pos: 0,
@@ -520,12 +575,23 @@ impl Basic {
             arrays: &self.arrays,
             strings: &self.strings,
         };
+        if parser.word("RANDOMIZE") {
+            parser.randomize()?;
+            return Ok(Flow::Next);
+        }
         if parser.word("POKE") {
             let address = parser.address()?;
             ensure!(parser.symbol(','), "expected comma");
             let value = u8::try_from(parser.expression()?).context("byte out of range")?;
             parser.end()?;
-            self.memory.insert(address, value);
+            if !self
+                .random
+                .borrow_mut()
+                .as_mut()
+                .is_some_and(|device| device.write(address, value))
+            {
+                self.memory.insert(address, value);
+            }
             return Ok(Flow::Next);
         }
         if parser.word("DATA") {
@@ -951,7 +1017,11 @@ impl Basic {
                 )?;
                 writeln!(
                     output,
-                    "PEEK(address), POKE address,byte: separate reference memory; use --native for RX-82 RAM and devices"
+                    "PEEK(address), POKE address,byte: reference memory plus optional random device; use --native for RX-82 RAM"
+                )?;
+                writeln!(
+                    output,
+                    "RND(n): 0..n-1; RANDOMIZE [seed] (requires --random-device)"
                 )?;
                 return Ok(());
             }

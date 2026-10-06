@@ -91,6 +91,11 @@ DISPATCH_SAVE:
     bne DISPATCH_AFTER_POKE
     jmp POKE_BYTE
 DISPATCH_AFTER_POKE:
+    ld cd, KW_RANDOMIZE
+    call MATCH
+    bne DISPATCH_AFTER_RANDOMIZE
+    jmp RANDOMIZE
+DISPATCH_AFTER_RANDOMIZE:
     ld cd, KW_SAVE
     call MATCH
     bne LONG_53
@@ -616,6 +621,11 @@ VALUE_NOT_LEN:
     bne VALUE_NOT_PEEK
     jmp PEEK_BYTE
 VALUE_NOT_PEEK:
+    ld cd, KW_RND
+    call MATCH
+    bne VALUE_NOT_RND
+    jmp RANDOM_NUMBER
+VALUE_NOT_RND:
     call IS_STRING
     beq VALUE_INTEGER
     jmp TYPE_MISMATCH
@@ -2069,7 +2079,8 @@ HELP_TEXT:
     data "DIM A(100): indices 0..100; 2048 array elements total", 0x0A
     data "A$..Z$: 63 ASCII characters, + joins strings; LEN(A$) or LEN(A)", 0x0A
     data "DATA constants; READ A,A(I),A$; RESTORE [line]", 0x0A
-    data "PEEK(address), POKE address,byte: RX-82 RAM, ROM and devices", 0x0A, 0x00
+    data "PEEK(address), POKE address,byte: RX-82 RAM, ROM and devices", 0x0A
+    data "RND(n): 0..n-1; RANDOMIZE [seed] (requires --random-device)", 0x0A, 0x00
 
 ; Diagnostic handlers share stack reset, file abort, line context and prompt recovery.
 INVALID_LINE_NUMBER:
@@ -3081,3 +3092,112 @@ BYTE_OUT_OF_RANGE:
     jmp REPORT_ERROR
 BYTE_OUT_OF_RANGE_TEXT:
     data "? BYTE OUT OF RANGE", 0x00
+
+; Optional random device: FF20 byte, FF21 status / entropy command,
+; FF22 seed low byte, FF23 seed high byte (commits a 16-bit seed).
+KW_RND:
+    data "RND", 0x00
+KW_RANDOMIZE:
+    data "RANDOMIZE", 0x00
+RANDOM_DEVICE:
+    ld cd, 0xFF21
+    ld a, (cd)
+    and a, 0x01
+    bne RANDOM_DEVICE_READY
+    ld cd, RANDOM_MISSING_TEXT
+    jmp REPORT_ERROR
+RANDOM_DEVICE_READY:
+    ret
+RANDOMIZE:
+    call SPACE
+    cmp a, 0x00
+    beq RANDOMIZE_ENTROPY
+    call EXPR
+    push ab
+    call EOL
+    call RANDOM_DEVICE
+    pop ab
+    ld cd, 0xFF22
+    ld (cd), b
+    ld (cd+0x01), a
+    ret
+RANDOMIZE_ENTROPY:
+    call RANDOM_DEVICE
+    ld a, 0x01
+    ld (cd), a
+    ld a, (cd)
+    and a, 0x80
+    beq RANDOM_DEVICE_READY
+    ld cd, RANDOM_SEED_ERROR_TEXT
+    jmp REPORT_ERROR
+RANDOM_NUMBER:
+    call SPACE
+    cmp a, 0x28
+    beq RANDOM_NUMBER_OPEN
+    jmp EXPECTED_LPAREN
+RANDOM_NUMBER_OPEN:
+    inc gh
+    call EXPR
+    push ab
+    call SPACE
+    cmp a, 0x29
+    beq RANDOM_NUMBER_CLOSE
+    jmp EXPECTED_RPAREN
+RANDOM_NUMBER_CLOSE:
+    inc gh
+    pop ab
+    cmp ab, 0x0000
+    beq RANDOM_BOUND_ERROR
+    cmp ab, 0x8000
+    bcs RANDOM_BOUND_ERROR
+    push ab
+    call RANDOM_DEVICE
+    pop ef
+    ; Reject the incomplete top interval before taking the remainder.
+    ld ab, 0x8000
+    call RANDOM_REMAINDER
+    ld cd, 0x8000
+    sec
+    sub cd, ab
+RANDOM_NUMBER_DRAW:
+    push cd
+    ld cd, 0xFF20
+    ld a, (cd)
+    and a, 0x7F
+    ld b, (cd)
+    pop cd
+    cmp ab, cd
+    bcs RANDOM_NUMBER_DRAW
+    jmp RANDOM_REMAINDER
+RANDOM_BOUND_ERROR:
+    ld cd, RANDOM_BOUND_TEXT
+    jmp REPORT_ERROR
+; Unsigned AB modulo positive EF; preserves CD, EF, GH.
+RANDOM_REMAINDER:
+    push cd
+    push ef
+    ld cd, ef
+RANDOM_REMAINDER_ALIGN:
+    cmp ef, ab
+    bcs RANDOM_REMAINDER_SUBTRACT
+    clc
+    add ef, ef
+    jmp RANDOM_REMAINDER_ALIGN
+RANDOM_REMAINDER_SUBTRACT:
+    cmp ab, ef
+    bcc RANDOM_REMAINDER_SHIFT
+    sec
+    sub ab, ef
+RANDOM_REMAINDER_SHIFT:
+    lsr ef, 0x01
+    cmp ef, cd
+    bcs RANDOM_REMAINDER_SUBTRACT
+    pop ef
+    pop cd
+    ret
+RANDOM_MISSING_TEXT:
+    data "? RANDOM DEVICE NOT AVAILABLE", 0x00
+RANDOM_BOUND_TEXT:
+    data "? INVALID RANDOM BOUND", 0x00
+RANDOM_SEED_ERROR_TEXT:
+    data "? RANDOM SEED FAILED", 0x00

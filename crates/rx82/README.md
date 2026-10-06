@@ -203,6 +203,46 @@ its destination and leaves that item unread; assignments earlier in the same
 line. The [table example](examples/data_table.bas) demonstrates mixed data and
 `RESTORE`; [sorting](examples/sort.bas) now fills its array from `DATA`.
 
+### Random numbers (optional device)
+
+Enable the random device explicitly with either interpreter:
+
+```sh
+cargo run -p rx82 -- basic --native --random-device
+cargo run -p rx82 -- basic --random-device --random-seed 42
+```
+
+`RND(n)` returns an integer from **0 through n-1**, with `n` from 1 to 32767.
+For a die roll, use `RND(6)+1`. Arguments may be expressions, including nested
+`RND` calls. This is an integer dialect: `RND(0)` and negative bounds are errors,
+and it does not implement the floating-point semantics of MSX BASIC's `RND`.
+
+```basic
+10 RANDOMIZE 42
+20 FOR I=1 TO 10
+30 PRINT RND(6)+1
+40 NEXT I
+```
+
+`RANDOMIZE seed` restarts a repeatable sequence. Its signed 16-bit expression is
+used as an unsigned bit pattern (`-1` means seed 65535); seed zero becomes 1.
+Bare `RANDOMIZE` obtains a fresh seed from the host operating system. The device
+also starts with an operating-system seed unless `--random-seed` supplies an
+initial unsigned 32-bit decimal seed. That flag requires `--random-device`.
+An explicit `RANDOMIZE` overrides the initial command-line seed.
+
+Both interpreters produce the same sequence for the same seed and reads.
+`RUN`, `NEW`, and `LOAD` do not reset this external device; put `RANDOMIZE seed`
+in the program when each run should repeat. `SAVE` stores the program, not the
+device state. Without the device, `RND` and `RANDOMIZE` report
+`RANDOM DEVICE NOT AVAILABLE`.
+
+Native BASIC obtains bytes through R8 loads and performs range reduction in
+ROM, rejecting the incomplete top interval to avoid modulo bias. The reference
+interpreter uses the same device implementation. `PEEK(65312)` reads a raw
+byte (0..255), consuming the same sequence as `RND`. See the random device
+registers below for seeding through `POKE`.
+
 ### PEEK / POKE
 
 ```basic
@@ -241,7 +281,8 @@ running machine and can disrupt it. The unused RAM at `0100`–`01FF` (decimal
 256–511) is suitable for small memory experiments; see [memory.bas](examples/memory.bas).
 
 The Rust reference interpreter provides its own zero-filled 64 KiB byte
-address space. It has no emulated CPU, ROM, devices, or BASIC variable mapping:
+address space. It has no emulated CPU, ROM, or BASIC variable mapping; when
+enabled, the random device occupies its register addresses in this space:
 `POKE 768,...` there does not change A. Reference bytes persist across `RUN`,
 `NEW`, and `LOAD`, until the interpreter session ends. In native mode these
 commands retain unused RAM but reset or replace their usual BASIC storage.
@@ -315,7 +356,8 @@ empty `I` sends a blank line. `Q` (or host EOF) exits the monitor; `I QUIT` then
 line numbers; see the monitor commands below.
 
 The native dialect supports `PRINT`, assignment (`LET` optional), integer and
-string `INPUT`, string concatenation, `LEN`, `DATA`/`READ`/`RESTORE`, `PEEK`/`POKE`, one-dimensional integer arrays
+string `INPUT`, string concatenation, `LEN`, `DATA`/`READ`/`RESTORE`, `PEEK`/`POKE`,
+`RND`/`RANDOMIZE` with the optional random device, one-dimensional integer arrays
 declared with `DIM`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
 six comparisons with `IF ... THEN`, `GOTO`, `GOSUB`/`RETURN`, `FOR`/`NEXT` with
 `STEP`, `REM`, `END`/`STOP`, `LIST`, `RUN`, `NEW`, and `QUIT`. Bounds, step
@@ -588,6 +630,41 @@ its output queue; all parsing and computation remain guest instructions.
 Guests should check input availability before reading data. EOF may be set
 while queued bytes remain. The existing `PUTCHAR` trap remains available to
 legacy programs. Native console I/O can be tested without a host terminal.
+
+## Random device
+
+The optional `random::RandomDevice` is a separate module implementing `Device`.
+The default machine does not attach it. Enable it with `--random-device` on
+`basic`, `mon`, or `run`; `--random-seed 42` makes its initial sequence repeatable.
+For `mon` and `run`, the frontend attaches it after the stock boot RAM test.
+It also works with native BASIC's `--step` and `--break-before-run` options.
+
+```rust
+use rx82::{random::RandomDevice, system::System};
+
+let mut sys = System::default();
+sys.devices.insert(0, Box::new(RandomDevice::with_seed(42)));
+```
+
+Use `RandomDevice::from_entropy()?` for an operating-system seed. The device
+uses xorshift32 (shifts 13, 17, 5), returning the high byte after each step.
+It is intended for games and simulations. A bus read held across multiple CPU
+cycles advances the generator only once; successive load instructions each
+advance it. The firmware and CPU instruction set need no changes.
+
+| Address | Read | Write |
+| :--- | :--- | :--- |
+| `FF20` / 65312 | Next random byte | Ignored |
+| `FF21` / 65313 | Status: bit 0 present, bit 7 seed request failed | 1 requests a fresh operating-system seed; other values ignored |
+| `FF22` / 65314 | Staged low seed byte | Stage low seed byte |
+| `FF23` / 65315 | Zero | Commit high byte and restart with the assembled 16-bit seed |
+
+A successful seed request clears the error flag. A failed entropy request
+preserves the old sequence; BASIC reports `RANDOM SEED FAILED` in native mode.
+Write both seed bytes, low first, when reseeding through `POKE`. Reading status
+or seed registers does not advance the generator. Monitor dumps that include
+`FF20` **do** consume a byte, as do direct `PEEK` calls, affecting later results.
+With no device installed these addresses read the stock ROM's zero padding.
 
 ## Boot process
 

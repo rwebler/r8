@@ -199,6 +199,11 @@ impl System {
 
         // Halt the CPU and set up the bus request
         self.cpu.halt = true;
+        // Give peripherals an idle cycle so each monitor read starts a fresh
+        // transaction, even when inspecting the same address repeatedly.
+        self.bus.mem = false;
+        self.bus.pending_write = None;
+        self.tick();
         self.bus.addr = addr;
         self.bus.mem = true;
         self.bus.write = false;
