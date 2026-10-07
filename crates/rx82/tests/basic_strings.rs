@@ -181,3 +181,99 @@ fn all_string_scalars_coexist_with_a_full_array_pool() {
         assert_eq!(stored_string(&mut sys, name), vec![name; 63]);
     }
 }
+
+#[test]
+fn string_functions_compose_in_both_interpreters() {
+    let (mut sys, outputs) = session(
+        "A$=\"abcdef\"\nB$=MID$(A$,2,3)+LEFT$(A$,2)+RIGHT$(A$,2)\nPRINT B$,MID$(A$,4),CHR$(65),ASC(\"Z\"),VAL(\" -123tail\")\nPRINT INSTR(A$,\"cd\"),INSTR(4,A$,\"cd\"),INSTR(2,\"banana\",\"ana\")\nPRINT LEN(MID$(A$,2)),ASC(CHR$(126)),VAL(MID$(\"x42y\",2)),MID$(A$,ASC(\"A\")-63,VAL(\"2\"))\nDIM C$(1)\nC$(1)=RIGHT$(B$,3)\nPRINT C$(1),LEFT$(MID$(A$,2),2),RIGHT$(LEFT$(A$,4),2)\nPRINT INSTR(MID$(\"banana\",2),CHR$(110)+\"a\"),INSTR(INSTR(\"banana\",\"n\"),\"banana\",\"a\")\nQUIT\n",
+    );
+    for output in outputs {
+        for expected in [
+            "bcdabef\tdef\tA\t90\t-123\n",
+            "3\t0\t2\n",
+            "5\t126\t42\tbc\n",
+            "bef\tbc\tcd\n",
+            "2\t4\n",
+        ] {
+            assert!(output.contains(expected), "missing {expected:?}: {output}");
+        }
+        assert!(!output.contains("? "), "{output}");
+    }
+    assert_eq!(stored_string(&mut sys, b'B'), b"bcdabef");
+}
+
+#[test]
+fn string_function_boundaries() {
+    let (_, outputs) = session(
+        "PRINT \"[\"+LEFT$(\"abc\",0)+RIGHT$(\"abc\",0)+MID$(\"abc\",1,0)+\"]\"\nPRINT LEFT$(\"abc\",32767),RIGHT$(\"abc\",32767),MID$(\"abc\",2,32767)\nPRINT LEN(MID$(\"abc\",4)),LEN(MID$(\"abc\",32767)),LEN(LEFT$(\"\",1)),LEN(RIGHT$(\"\",1))\nPRINT VAL(\"\"),VAL(\"abc\"),VAL(\"+\"),VAL(\"12.5\"),VAL(\"+32767!\"),VAL(\"-32768\")\nPRINT INSTR(\"\",\"\"),INSTR(\"abc\",\"\"),INSTR(3,\"abc\",\"\"),INSTR(4,\"abc\",\"\"),INSTR(\"abc\",\"abcd\")\nPRINT INSTR(\"ababa\",\"aba\"),INSTR(2,\"ababa\",\"aba\"),INSTR(\"Abc\",\"a\"),ASC(CHR$(9))\nQUIT\n",
+    );
+    for output in outputs {
+        for expected in [
+            "[]\n",
+            "abc\tabc\tbc\n",
+            "0\t0\t0\t0\n",
+            "0\t0\t0\t12\t32767\t-32768\n",
+            "0\t1\t3\t0\t0\n",
+            "1\t3\t0\t9\n",
+        ] {
+            assert!(output.contains(expected), "missing {expected:?}: {output}");
+        }
+        assert!(!output.contains("? "), "{output}");
+    }
+}
+
+#[test]
+fn invalid_string_functions_report_line_and_recover() {
+    for (expression, cause) in [
+        ("MID$(\"abc\",0)", "invalid function argument"),
+        ("MID$(\"abc\",-1)", "invalid function argument"),
+        ("MID$(\"abc\",1,-1)", "invalid function argument"),
+        ("LEFT$(\"abc\",-1)", "invalid function argument"),
+        ("RIGHT$(\"abc\",-1)", "invalid function argument"),
+        ("CHR$(0)", "invalid string character"),
+        ("CHR$(127)", "invalid string character"),
+        ("CHR$(256)", "invalid string character"),
+        ("CHR$(-1)", "invalid string character"),
+        ("ASC(\"\")", "invalid function argument"),
+        ("INSTR(0,\"abc\",\"a\")", "invalid function argument"),
+        ("INSTR(-1,\"abc\",\"a\")", "invalid function argument"),
+        ("VAL(\"32768\")", "integer overflow"),
+        ("VAL(\"-32769\")", "integer overflow"),
+        ("VAL(\"999999999999999999999\")", "integer overflow"),
+        ("MID$(1,1)", "type mismatch"),
+        ("LEFT$(\"abc\",\"x\")", "type mismatch"),
+        ("CHR$(\"x\")", "type mismatch"),
+        ("ASC(1)", "type mismatch"),
+        ("VAL(1)", "type mismatch"),
+        ("INSTR(\"abc\",1)", "type mismatch"),
+        ("LEFT$(\"x\" 1)", "expected comma"),
+        ("MID$(\"x\",1", "expected )"),
+        ("ASC \"x\"", "expected ("),
+    ] {
+        let (_, outputs) = session(&format!(
+            "10 A$=\"safe\"\n20 PRINT {expression}\nRUN\nPRINT A$,42\nQUIT\n"
+        ));
+        for output in outputs {
+            let lower = output.to_ascii_lowercase();
+            assert!(
+                lower.contains(cause) && lower.contains("line 20"),
+                "{expression}: {output}"
+            );
+            assert!(output.contains("safe\t42\n"), "{output}");
+        }
+    }
+}
+
+#[test]
+fn string_functions_handle_full_length_and_release_temporaries() {
+    let mut full = "a".repeat(254);
+    full.push('z');
+    let (mut sys, outputs) = session(&format!(
+        "5 INPUT A$\n10 FOR I=1 TO 20\n20 B$=MID$(A$,1)+LEFT$(A$,0)\n30 C$=RIGHT$(B$,255)\n40 N=ASC(RIGHT$(C$,1))+VAL(\"1\")+INSTR(C$,\"z\")\n50 NEXT I\n60 PRINT LEN(B$),LEN(C$),N,MID$(C$,255),INSTR(255,C$,\"z\")\nRUN\n{full}\nQUIT\n"
+    ));
+    for output in &outputs {
+        assert!(output.contains("255\t255\t378\tz\t255\n"), "{output}");
+        assert!(!output.contains("? INVALID"), "{output}");
+    }
+    assert_eq!(stored_string(&mut sys, b'A'), full.as_bytes());
+}
