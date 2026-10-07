@@ -13,6 +13,8 @@ use std::io::{BufRead, Write};
 #[derive(Default)]
 pub struct Basic {
     random: RefCell<Option<crate::random::RandomDevice>>,
+    pool: RefCell<StringPool>,
+    string_arrays: BTreeMap<String, Vec<String>>,
     // Reference-only byte memory; native BASIC uses the RX-82 bus instead.
     memory: BTreeMap<u16, u8>,
     data_line: u16,
@@ -29,6 +31,91 @@ enum Token {
     Word(String),
     Text(String),
     Symbol(char),
+}
+
+/// Mirror the guest's physical allocation and temporary-space accounting.
+#[derive(Default)]
+struct StringPool {
+    blocks: Vec<StringBlock>,
+    temporaries: Vec<usize>,
+}
+struct StringBlock {
+    length: usize,
+    owner: Option<(String, Option<usize>)>,
+}
+impl StringPool {
+    fn begin(&mut self) {
+        if self.temporaries.is_empty() {
+            self.blocks.retain(|block| block.owner.is_some());
+        }
+    }
+    fn bump(&self) -> usize {
+        self.blocks.iter().fold(0_usize, |sum, block| {
+            sum.saturating_add(block.length.saturating_add(1))
+        })
+    }
+    fn top(&self) -> usize {
+        4096_usize.saturating_sub(self.temporaries.iter().fold(0_usize, |sum, length| {
+            sum.saturating_add(length.saturating_add(1))
+        }))
+    }
+    fn push(&mut self, length: usize) -> Result<()> {
+        ensure!(
+            self.top().saturating_sub(length.saturating_add(1)) > self.bump(),
+            "STRING SPACE"
+        );
+        self.temporaries.push(length);
+        Ok(())
+    }
+    fn pop(&mut self) {
+        self.temporaries.pop();
+    }
+    fn store(&mut self, owner: (String, Option<usize>), length: usize) -> Result<()> {
+        let allocation = if length == 0 {
+            None
+        } else {
+            let reusable = self.blocks.iter().position(|block| {
+                block.owner.is_none()
+                    && block.length >= length
+                    && block.length != length.saturating_add(1)
+            });
+            let index = if let Some(index) = reusable {
+                let block = self.blocks.get_mut(index).context("STRING SPACE")?;
+                let leftover = block.length.saturating_sub(length);
+                block.length = length;
+                if leftover >= 2 {
+                    self.blocks.insert(
+                        index.saturating_add(1),
+                        StringBlock {
+                            length: leftover.saturating_sub(1),
+                            owner: None,
+                        },
+                    );
+                }
+                index
+            } else {
+                ensure!(
+                    self.bump().saturating_add(length.saturating_add(1)) < self.top(),
+                    "STRING SPACE"
+                );
+                self.blocks.push(StringBlock {
+                    length,
+                    owner: None,
+                });
+                self.blocks.len().saturating_sub(1)
+            };
+            Some(index)
+        };
+        for block in &mut self.blocks {
+            if block.owner.as_ref() == Some(&owner) {
+                block.owner = None;
+            }
+        }
+        if let Some(index) = allocation {
+            self.blocks.get_mut(index).context("STRING SPACE")?.owner = Some(owner);
+        }
+        Ok(())
+    }
 }
 
 fn lex(source: &str) -> Result<Vec<Token>> {
@@ -93,6 +180,8 @@ fn lex(source: &str) -> Result<Vec<Token>> {
 
 struct Parser<'source> {
     random: &'source RefCell<Option<crate::random::RandomDevice>>,
+    pool: &'source RefCell<StringPool>,
+    string_arrays: &'source BTreeMap<String, Vec<String>>,
     memory: &'source BTreeMap<u16, u8>,
     tokens: &'source [Token],
     pos: usize,
@@ -102,7 +191,7 @@ struct Parser<'source> {
 }
 
 fn check_string(value: &str) -> Result<()> {
-    ensure!(value.len() <= 63, "string too long");
+    ensure!(value.len() <= 255, "STRING TOO LONG");
     ensure!(
         value
             .bytes()
@@ -164,32 +253,62 @@ impl Parser<'_> {
         matches!(first, Some(Token::Text(_)))
             || matches!(first, Some(Token::Word(name)) if name.ends_with('$'))
     }
-    fn string_expression(&mut self) -> Result<String> {
-        let mut value = String::new();
-        loop {
-            let part = match self.next() {
-                Some(Token::Text(text)) => text,
-                Some(Token::Word(name)) if name.ends_with('$') => {
+    fn string_atom(&mut self) -> Result<String> {
+        let value = match self.next() {
+            Some(Token::Text(text)) => text,
+            Some(Token::Word(name)) if name.ends_with('$') => {
+                if let Some(index) = self.subscript(&name)? {
+                    self.string_arrays
+                        .get(&name)
+                        .and_then(|array| array.get(index))
+                        .context("subscript out of range")?
+                        .clone()
+                } else {
                     self.strings.get(&name).cloned().unwrap_or_default()
                 }
-                Some(Token::Symbol('(')) => {
-                    let text = self.string_expression()?;
-                    ensure!(self.symbol(')'), "expected )");
-                    text
-                }
-                _ => bail!("type mismatch"),
-            };
-            value.push_str(&part);
-            check_string(&value)?;
-            if !self.symbol('+') {
+            }
+            Some(Token::Symbol('(')) => {
+                let value = self.string_expression()?;
+                ensure!(self.symbol(')'), "expected )");
                 return Ok(value);
             }
+            _ => bail!("type mismatch"),
+        };
+        check_string(&value)?;
+        self.pool.borrow_mut().push(value.len())?;
+        Ok(value)
+    }
+    fn string_expression(&mut self) -> Result<String> {
+        let mut value = self.string_atom()?;
+        while self.symbol('+') {
+            let right = self.string_atom()?;
+            value.push_str(&right);
+            check_string(&value)?;
+            let mut pool = self.pool.borrow_mut();
+            pool.pop();
+            pool.pop();
+            pool.push(value.len())?;
         }
+        Ok(value)
     }
     fn length(&mut self) -> Result<i16> {
         ensure!(self.symbol('('), "expected (");
-        let size = if self.is_string() {
-            self.string_expression()?.len()
+        let bare_string_array = match self.tokens.get(self.pos).cloned() {
+            Some(Token::Word(name))
+                if name.ends_with('$')
+                    && self.tokens.get(self.pos.saturating_add(1)) == Some(&Token::Symbol(')')) =>
+            {
+                self.string_arrays.get(&name).map(Vec::len)
+            }
+            _ => None,
+        };
+        let size = if let Some(size) = bare_string_array {
+            self.next();
+            size
+        } else if self.is_string() {
+            let length = self.string_expression()?.len();
+            self.pool.borrow_mut().pop();
+            length
         } else {
             let Some(Token::Word(name)) = self.next() else {
                 bail!("type mismatch");
@@ -247,9 +366,14 @@ impl Parser<'_> {
         }
         let index = self.expression()?;
         ensure!(self.symbol(')'), "expected )");
-        let array = self.arrays.get(name).context("array not dimensioned")?;
+        let size = if name.ends_with('$') {
+            self.string_arrays.get(name).map(Vec::len)
+        } else {
+            self.arrays.get(name).map(Vec::len)
+        }
+        .context("array not dimensioned")?;
         let index = usize::try_from(index).context("subscript out of range")?;
-        ensure!(index < array.len(), "subscript out of range");
+        ensure!(index < size, "subscript out of range");
         Ok(Some(index))
     }
     fn address(&mut self) -> Result<u16> {
@@ -478,6 +602,8 @@ impl Basic {
         loop {
             let mut parser = Parser {
                 random: &self.random,
+                pool: &self.pool,
+                string_arrays: &self.string_arrays,
                 memory: &self.memory,
                 tokens,
                 pos,
@@ -489,11 +615,7 @@ impl Basic {
                 bail!("expected variable");
             };
             let string = name.ends_with('$');
-            let index = if string {
-                None
-            } else {
-                parser.subscript(&name)?
-            };
+            let index = parser.subscript(&name)?;
             let more = parser.symbol(',');
             if !more {
                 parser.end()?;
@@ -502,7 +624,8 @@ impl Basic {
             let (text, quoted, next) = self.data_item()?;
             if string {
                 check_string(&text)?;
-                self.strings.insert(name, text);
+                self.pool.borrow_mut().push(text.len())?;
+                self.store_string(name, index, text)?;
             } else {
                 ensure!(!quoted, "type mismatch");
                 let digits = text.strip_prefix(['+', '-']).unwrap_or(&text);
@@ -540,6 +663,8 @@ impl Basic {
         self.vars.clear();
         self.arrays.clear();
         self.strings.clear();
+        self.string_arrays.clear();
+        *self.pool.get_mut() = StringPool::default();
         self.reset_data();
         Ok(())
     }
@@ -560,7 +685,34 @@ impl Basic {
         self.reset_data();
         Ok(true)
     }
+    fn store_string(&mut self, name: String, index: Option<usize>, value: String) -> Result<()> {
+        self.pool
+            .borrow_mut()
+            .store((name.clone(), index), value.len())?;
+        if let Some(index) = index {
+            *self
+                .string_arrays
+                .get_mut(&name)
+                .and_then(|array| array.get_mut(index))
+                .context("subscript out of range")? = value;
+        } else {
+            self.strings.insert(name, value);
+        }
+        self.pool.borrow_mut().pop();
+        Ok(())
+    }
     fn statement(
+        &mut self,
+        tokens: &[Token],
+        input: &mut impl BufRead,
+        output: &mut impl Write,
+    ) -> Result<Flow> {
+        self.pool.borrow_mut().begin();
+        let result = self.statement_body(tokens, input, output);
+        self.pool.borrow_mut().temporaries.clear();
+        result
+    }
+    fn statement_body(
         &mut self,
         tokens: &[Token],
         input: &mut impl BufRead,
@@ -568,6 +720,8 @@ impl Basic {
     ) -> Result<Flow> {
         let mut parser = Parser {
             random: &self.random,
+            pool: &self.pool,
+            string_arrays: &self.string_arrays,
             memory: &self.memory,
             tokens,
             pos: 0,
@@ -621,7 +775,6 @@ impl Basic {
             let Some(Token::Word(name)) = parser.next() else {
                 bail!("expected array name");
             };
-            ensure!(!name.ends_with('$'), "string arrays not supported");
             ensure!(parser.symbol('('), "expected (");
             let upper = parser.expression()?;
             ensure!(parser.symbol(')'), "expected )");
@@ -630,15 +783,23 @@ impl Basic {
                 .context("subscript out of range")?
                 .saturating_add(1);
             ensure!(
-                !self.arrays.contains_key(&name),
+                !self.arrays.contains_key(&name) && !self.string_arrays.contains_key(&name),
                 "array already dimensioned"
             );
             let used = self
                 .arrays
                 .values()
                 .fold(0_usize, |total, array| total.saturating_add(array.len()));
+            let used = self
+                .string_arrays
+                .values()
+                .fold(used, |total, array| total.saturating_add(array.len()));
             ensure!(used.saturating_add(size) <= 2048, "array memory full");
-            self.arrays.insert(name, vec![0; size]);
+            if name.ends_with('$') {
+                self.string_arrays.insert(name, vec![String::new(); size]);
+            } else {
+                self.arrays.insert(name, vec![0; size]);
+            }
             return Ok(Flow::Next);
         }
         if parser.word("REM") {
@@ -695,7 +856,10 @@ impl Basic {
             let unequal = op == '<' && !equal && parser.symbol('>');
             ensure!(op != '=' || !equal, "use = for equality");
             let ordering = if let Some(text) = text {
-                text.cmp(&parser.string_expression()?)
+                let ordering = text.cmp(&parser.string_expression()?);
+                self.pool.borrow_mut().pop();
+                self.pool.borrow_mut().pop();
+                ordering
             } else {
                 left.cmp(&parser.expression()?)
             };
@@ -731,6 +895,7 @@ impl Basic {
             while parser.pos < tokens.len() {
                 if parser.is_string() {
                     write!(output, "{}", parser.string_expression()?)?;
+                    self.pool.borrow_mut().pop();
                 } else {
                     write!(output, "{}", parser.expression()?)?;
                 }
@@ -779,6 +944,7 @@ impl Basic {
             bail!("expected statement or variable");
         };
         if name.ends_with('$') {
+            let index = parser.subscript(&name)?;
             let value = if read {
                 parser.end()?;
                 write!(output, "? ")?;
@@ -792,6 +958,7 @@ impl Basic {
                     }
                 }
                 check_string(&line)?;
+                self.pool.borrow_mut().push(line.len())?;
                 line
             } else {
                 ensure!(parser.symbol('='), "expected =");
@@ -799,7 +966,7 @@ impl Basic {
                 parser.end()?;
                 text
             };
-            self.strings.insert(name, value);
+            self.store_string(name, index, value)?;
             return Ok(Flow::Next);
         }
         let index = parser.subscript(&name)?;
@@ -834,6 +1001,8 @@ impl Basic {
         self.vars.clear();
         self.arrays.clear();
         self.strings.clear();
+        self.string_arrays.clear();
+        *self.pool.get_mut() = StringPool::default();
         self.reset_data();
         let program: BTreeMap<u16, Vec<Token>> = self
             .lines
@@ -860,9 +1029,16 @@ impl Basic {
         while let Some(line) = pc {
             let tokens = program.get(&line).context("missing line")?;
             let next = after(line);
-            let flow = self
-                .statement(tokens, input, output)
-                .with_context(|| format!("in line {line}"))?;
+            let flow = self.statement(tokens, input, output).map_err(|error| {
+                if matches!(
+                    error.to_string().as_str(),
+                    "STRING SPACE" | "STRING TOO LONG"
+                ) {
+                    anyhow::anyhow!("{error} IN LINE {line}")
+                } else {
+                    error.context(format!("in line {line}"))
+                }
+            })?;
             let loop_base = stack.last().map_or(0, |&(_, depth)| depth);
             pc = match flow {
                 Flow::Next => next,
@@ -993,6 +1169,8 @@ impl Basic {
                 self.vars.clear();
                 self.arrays.clear();
                 self.strings.clear();
+                self.string_arrays.clear();
+                *self.pool.get_mut() = StringPool::default();
                 self.reset_data();
                 return Ok(());
             }
@@ -1009,7 +1187,7 @@ impl Basic {
                 )?;
                 writeln!(
                     output,
-                    "Strings: name$, 63 ASCII characters, + joins strings; LEN(name$) or LEN(array)"
+                    "Strings: name$, 255 ASCII characters; DIM name$(upper); + and LEN; shared 4096-byte pool"
                 )?;
                 writeln!(
                     output,

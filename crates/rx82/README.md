@@ -99,6 +99,7 @@ The initial dialect supports:
 - `LET name = expression` (the `LET` keyword is optional), and `INPUT name`.
 - String variables such as `A$`, assignment (`A$="hello"`), `INPUT A$`,
   concatenation (`A$+"!"`), and parenthesized string expressions.
+- String arrays with `DIM A$(100)`, assignment, `INPUT`, and `READ` into elements.
 - `LEN(string)` counts characters; `LEN(array)` counts allocated elements.
   For `DIM A(100)`, `LEN(A)` is **101**, including element zero. Pass the bare
   array name, not an indexed element: `LEN(A(0))` is a type error.
@@ -136,8 +137,8 @@ use signed 16-bit values.
 ```
 
 String variables end in `$` and default to the empty string. `A`, `A$`, and
-array `A(...)` are independent. Each string value, including literals and
-concatenation results, may contain up to 63 characters: printable ASCII and
+arrays `A(...)` and `A$(...)` are independent. Each string value, including literals and
+concatenation results, may contain up to 255 characters: printable ASCII and
 tabs. Case and spaces are preserved. `INPUT A$` reads an unquoted line, preserving
 leading and trailing spaces; an empty line assigns `""`. Quotes in input are
 ordinary characters. Quoted source literals have no escape syntax.
@@ -150,8 +151,24 @@ strings: use `PRINT "Score: ";N` to print a number alongside text.
 `RUN`, `NEW`, and successful `LOAD` clear strings as well as numeric variables
 and arrays. Failed string assignments and failed `LOAD` operations preserve
 existing values. `SAVE` stores source, including string literals, rather than
-runtime values. String arrays are not supported. The native ROM has 26 string
+runtime values. The native ROM has 26 string
 variables (`A$`–`Z$`); the reference interpreter also permits longer names.
+
+Use `DIM R$(2)` to allocate three string elements, then assign, INPUT, or READ
+`R$(0)` through `R$(2)`. Integer and string arrays share the 2048-element limit.
+`LEN(R$(0))` returns an element's length. Bare `LEN(R$)` returns the array's
+size when dimensioned, otherwise the scalar's length; `LEN((R$))` always
+measures the scalar. See [rooms.bas](examples/rooms.bas).
+
+Both runners share a 4096-byte string-space budget. Each stored nonempty string
+uses its length plus one byte; empty stored strings use no space. Expression
+pieces also need their length plus one byte while being evaluated. Reassignment
+allocates the replacement before releasing the old string. Consequently a
+store can report `STRING SPACE` even if the final values alone would fit.
+Failed stores retain the old value. Freed records are reused, and compaction
+runs between statements when no temporaries remain. `PRINT` and `LEN` release
+results without storing them. Program records remain 128 bytes, so long values
+must be built with `+` or supplied to string INPUT (up to 255 characters).
 
 ### DATA / READ / RESTORE
 
@@ -186,7 +203,7 @@ containing commas, colons, or significant edge spaces with quotes:
 ```
 
 Unquoted text is trimmed at both ends. Quoted `""` is an empty string; omitted
-fields and trailing commas are invalid. Each item is limited to 63 ASCII
+fields and trailing commas are invalid. Each item is limited to 255 ASCII
 characters. DATA syntax is checked when an item is read, so unused items do
 not cause runtime errors. Numeric-looking items can be read as text with a
 string target; quoted text is not converted to an integer.
@@ -320,7 +337,7 @@ active loop variable cannot be reused by another loop. `END`, `STOP`, errors,
 and a fresh `RUN` discard execution's loop state.
 
 This version has one statement per line, integer variables and arrays, and
-string variables. Floating point and string arrays are not implemented.
+string variables and string arrays. Floating point is not implemented.
 
 More runnable programs and a monitor inspection walkthrough are in the
 [BASIC examples guide](examples/README.md), including Fibonacci numbers,
@@ -340,7 +357,7 @@ cargo run -p rx82 -- basic --native --step program.bas
 cargo run -p rx82 -- basic --native --break-before-run program.bas
 ```
 
-`--step` opens the monitor at BASIC ROM entry (`D000`), before the source is loaded.
+`--step` opens the monitor at BASIC ROM entry (`C100`), before the source is loaded.
 `--break-before-run` first lets the ROM consume the numbered source file, then
 opens the monitor with records loaded and `RUN` queued but not executed. Use
 `M 1000` to inspect source, `M 0300` to inspect variables, and `G` to continue.
@@ -357,7 +374,7 @@ line numbers; see the monitor commands below.
 
 The native dialect supports `PRINT`, assignment (`LET` optional), integer and
 string `INPUT`, string concatenation, `LEN`, `DATA`/`READ`/`RESTORE`, `PEEK`/`POKE`,
-`RND`/`RANDOMIZE` with the optional random device, one-dimensional integer arrays
+`RND`/`RANDOMIZE` with the optional random device, one-dimensional integer and string arrays
 declared with `DIM`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
 six comparisons with `IF ... THEN`, `GOTO`, `GOSUB`/`RETURN`, `FOR`/`NEXT` with
 `STEP`, `REM`, `END`/`STOP`, `LIST`, `RUN`, `NEW`, and `QUIT`. Bounds, step
@@ -399,8 +416,8 @@ Writes accumulate until close. Relative paths use the host working directory.
 The device is attached only to the native BASIC machine, before its ROM.
 
 The original `sys/rx82_rom.asm` and its binary remain unchanged. BASIC is a
-separate image mapped at `D000` in the system firmware's unused padding.
-`System::install_rom(start, data)` installs modules within `D000`–`FEFF`, rejecting
+separate image mapped at `C100` in the system firmware's unused padding.
+`System::install_rom(start, data)` installs modules within `C100`–`FEFF`, rejecting
 overlapping modules, nonzero firmware bytes, and images outside that window.
 Only the image's actual bytes are mapped. `System::enter_rom(start)` initializes
 the CPU at an installed module's entry point, preserving RAM. The native BASIC
@@ -410,20 +427,33 @@ The stock reset vector still points to `C000`; reset enters the system firmware,
 not BASIC. This is a fixed address expansion window, not bank switching or
 automatic firmware discovery. Modules must be assembled for their load address.
 
-Memory layout: console at `FF00`–`FF02`, BASIC code starting at `D000` (within
-`D000`–`FEFF`), original system ROM at `C000` and reset vector at `FFFE`,
-line buffer at `0200`, little-endian variable words at `0300`–`0333`,
-subroutine frames at `0400`–`04FF`, loop frames at `0500`–`07FF`,
-array descriptors at `0800`–`0867`, string slots at `0900`–`0F7F`,
-string expression buffers at `0F80`–`0FFF`, program records at `1000`–`8FFF`,
-array elements at `9000`–`9FFF`, stack at `A000`–`BFFF`.
-Each four-byte array descriptor (A through Z) contains a little-endian base
-address and inclusive upper bound. A zero base means undeclared; elements
-are little-endian signed words. `M 0800` inspects declarations and `M 9000`
-inspects the first allocated array. Strings occupy 64-byte slots with a NUL
-terminator: A$ at `0900`, B$ at `0940`, through Z$ at `0F40`. `M 0900`
-shows the first two strings in the dump's ASCII column. Each 128-byte record has
-a little-endian line number followed by NUL-terminated source; zero marks a free
+Memory layout: console at `FF00`–`FF02`, BASIC code within `C100`–`EEFF`,
+original system firmware at `C000`–`C0FF`, reset vector at `FFFE`, and optional
+string RAM at `EF00`–`FEFF`. The BASIC frontend installs that RAM ahead of the
+stock ROM's zero padding. Ordinary machines retain the stock memory map.
+The line buffer is at `0200`, integer scalar words at `0300`–`0333`, string
+scalar offsets at `0340`–`0373`, subroutine frames at `0400`–`04FF`, loop frames
+at `0500`–`07FF`, integer-array descriptors at `0800`–`0867`, string-array
+descriptors at `0870`–`08D7`, scratch at `0900`–`0FFF`, program records at
+`1000`–`8FFF`, shared array elements at `9000`–`9FFF`, and the CPU stack at
+`A000`–`BFFF`.
+
+Each array descriptor contains a little-endian absolute base and inclusive
+upper bound. Zero base means undeclared. Integer elements hold signed words;
+string elements and scalar slots hold one-based pool offsets. A zero offset
+means empty. Otherwise add `EEFF` to obtain the record address: its first byte
+is the length, followed by that many ASCII bytes, without a NUL terminator.
+For example, `M 0340` inspects scalar string offsets and `M EF00` shows pool
+records. In BASIC, `P=PEEK(832)+256*PEEK(833)` reads A$'s offset; when P is
+nonzero, `PEEK(P-4353)` reads its length and `PEEK(P-4352)` its first character.
+Addresses change during compaction, so obtain the current offset before use.
+
+The pool bump is at `00B2`, temporary top at `00B6`, and statement mark at
+`00B8`. Stable records grow upward from `EF00`; temporaries grow downward from
+`FF00`. Freed records start with zero followed by their former payload length.
+Compaction updates string references and ignores integer array words.
+Each 128-byte program record has a little-endian line number followed by
+NUL-terminated source; zero marks a free
 record. ROM source is `sys/basic_rom.asm`; rebuild its checked-in image with
 `cargo run -p rx82 -- asm crates/rx82/sys/basic_rom.asm`. Tests verify image/source
 agreement, ROM size, output, and guest RAM contents.
@@ -445,7 +475,7 @@ These counts include the test harness and arithmetic helpers, but exclude
 BASIC parsing and printing.
 
 The native DATA cursor uses little-endian words at `00B4` (last scanned line)
-and `00B6` (next item's source address; zero means search the next line).
+and `00BC` (next item's source address; zero means search the next line).
 The ROM parses DATA directly from program records without a separate data copy.
 
 ### Native diagnostics
@@ -461,9 +491,9 @@ The line suffix identifies the executing statement, not the missing target.
 | `SUBSCRIPT OUT OF RANGE` | Use an index from zero through the declared bound. |
 | `ARRAY MEMORY FULL` | All arrays together must fit in 2,048 elements. |
 | `TYPE MISMATCH` | Use matching types; `LEN` accepts strings or bare array names. |
-| `STRING TOO LONG` | A string value exceeds 63 characters. Shorten it before concatenating. |
+| `STRING SPACE` | Stable strings and active temporaries do not fit. Release unused strings or shorten expressions. |
+| `STRING TOO LONG` | A string value exceeds 255 characters. Shorten it before concatenating. |
 | `INVALID STRING CHARACTER` | Use printable ASCII or tabs. |
-| `STRING ARRAYS NOT SUPPORTED` | `DIM` currently declares integer arrays only. |
 | `OUT OF DATA` | No unread DATA items remain; add data or use `RESTORE`. |
 | `INVALID DATA` | A read encountered an empty field or malformed constant delimiter. |
 | `BYTE OUT OF RANGE` | The value given to `POKE` must be between 0 and 255. |
@@ -561,10 +591,10 @@ control returns to the monitor, so memory and console inspection see its result.
 For example, start native BASIC with `--step`, then use:
 
 ```text
-B D000
+B C100
 G
 S
-BC D000
+BC C100
 G
 ```
 

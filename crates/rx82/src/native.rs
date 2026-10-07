@@ -12,7 +12,7 @@ use std::io::{BufRead, Write};
 /// Native interpreter assembled from `sys/basic_rom.asm`.
 pub const ROM: &[u8] = include_bytes!("../sys/basic_rom.bin");
 /// Entry address of the optional BASIC extension ROM.
-pub const ROM_START: u16 = 0xD000;
+pub const ROM_START: u16 = 0xC100;
 
 /// Creates a machine paused at the BASIC extension entry point.
 ///
@@ -31,6 +31,14 @@ pub fn machine() -> (System, Rc<RefCell<ConsoleState>>) {
         ..System::default()
     };
     sys.devices.insert(0, Box::new(console));
+    sys.devices.insert(
+        0,
+        Box::new(crate::memory::Memory {
+            start: 0xEF00,
+            end: 0xFEFF,
+            data: vec![0; 4096],
+        }),
+    );
     sys.devices
         .insert(1, Box::<crate::files::FilePort>::default());
     sys.install_rom(ROM_START, ROM)
@@ -389,7 +397,7 @@ mod tests {
     #[test]
     fn native_peek_and_poke_access_variables_arrays_strings_and_source() {
         let (sys, output) = session(
-            "10 PRINT 1\nA=4660\nDIM B(1)\nB(1)=1027\nC$=\"cat\"\nPRINT PEEK(768),PEEK(769),PEEK(36866),PEEK(4096),PEEK(4098)\nPOKE 768,120\nPOKE 36866,255\nPOKE 2432,98\nPOKE 4104,50\nPRINT A,B(1),C$\nRUN\nQUIT\n",
+            "10 PRINT 1\nA=4660\nDIM B(1)\nB(1)=1027\nC$=\"cat\"\nPRINT PEEK(768),PEEK(769),PEEK(36866),PEEK(4096),PEEK(4098)\nPOKE 768,120\nPOKE 36866,255\nPOKE 61185,98\nPOKE 4104,50\nPRINT A,B(1),C$\nRUN\nQUIT\n",
         );
         assert!(output.contains("52\t18\t3\t10\t80\n"), "{output}");
         assert!(output.contains("4728\t1279\tbat\n"), "{output}");
@@ -400,7 +408,7 @@ mod tests {
     #[test]
     fn native_memory_access_uses_devices_and_keeps_rom_read_only() {
         let (_, output) = session(
-            "A=PEEK(53248)\nPOKE 53248,255\nPRINT A,PEEK(53248)\nPOKE 65535,0\nPRINT PEEK(65535),PEEK(-1)\nPOKE 65282,126\nPRINT PEEK(65281),PEEK(65281)\nABQUIT\n",
+            "A=PEEK(49408)\nPOKE 49408,255\nPRINT A,PEEK(49408)\nPOKE 65535,0\nPRINT PEEK(65535),PEEK(-1)\nPOKE 65282,126\nPRINT PEEK(65281),PEEK(65281)\nABQUIT\n",
         );
         let first_byte = ROM.first().unwrap();
         assert!(
@@ -483,7 +491,7 @@ mod tests {
     #[test]
     fn native_module_keeps_stock_firmware_and_reset_vector() {
         let (mut sys, _) = machine();
-        for addr in 0xC000..0xD000 {
+        for addr in 0xC000..ROM_START {
             assert_eq!(
                 Some(sys.peek_mem(addr)),
                 crate::system::ROM_DATA
@@ -568,7 +576,7 @@ mod tests {
             r8asm::assemble(include_str!("../sys/basic_rom.asm")).unwrap(),
             ROM
         );
-        assert!(ROM.len() <= 0x2F00);
+        assert!(ROM.len() <= 0x2E00);
     }
     #[test]
     fn native_editor_and_execution_use_guest_ram() {

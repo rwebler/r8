@@ -153,7 +153,7 @@ impl System {
         Ok(())
     }
 
-    /// Installs an extension in the firmware expansion window D000..FEFF.
+    /// Installs an extension in the firmware expansion window C100..FEFF.
     /// The original firmware image and reset vector remain unchanged.
     ///
     /// # Errors
@@ -164,8 +164,8 @@ impl System {
             .saturating_add(data.len())
             .saturating_sub(1);
         ensure!(
-            start >= 0xD000 && end <= 0xFEFF,
-            "ROM module outside D000..FEFF"
+            start >= 0xC100 && end <= 0xFEFF,
+            "ROM module outside C100..FEFF"
         );
         let end = u16::try_from(end)?;
         ensure!(

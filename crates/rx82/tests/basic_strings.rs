@@ -24,9 +24,22 @@ fn session(commands: &str) -> (System, [String; 2]) {
     (sys, [String::from_utf8(output).unwrap(), native_output])
 }
 
+fn stored_string(sys: &mut System, name: u8) -> Vec<u8> {
+    let slot = 0x0340_u16.strict_add(u16::from(name.strict_sub(b'A')).strict_mul(2));
+    let offset = u16::from_le_bytes([sys.mem.get(slot), sys.mem.get(slot.strict_add(1))]);
+    if offset == 0 {
+        return Vec::new();
+    }
+    let address = 0xEEFF_u16.strict_add(offset);
+    let length = sys.peek_mem(address);
+    (1..=u16::from(length))
+        .map(|index| sys.peek_mem(address.strict_add(index)))
+        .collect()
+}
+
 #[test]
 fn strings_and_len_work_in_integer_expressions_and_guest_ram() {
-    let (sys, outputs) = session(
+    let (mut sys, outputs) = session(
         "10 A=7\n20 DIM A(LEN(\"abc\"))\n30 a$=\"MiXeD\"\n40 B$=(A$+(\" \"+\"case\"))\n50 A(LEN(A)-1)=2*LEN(B$)+LEN(A$)/5\n60 PRINT A,A(3),A$,B$,LEN(A),LEN(\"\"),LEN(Z$)\n70 FOR I=0 TO LEN(A)-1\n80 PRINT LEN((A$+\"!\"));\n90 NEXT I\n100 PRINT\nRUN\nQUIT\n",
     );
     for output in outputs {
@@ -36,13 +49,7 @@ fn strings_and_len_work_in_integer_expressions_and_guest_ram() {
         );
         assert!(!output.contains("? "), "{output}");
     }
-    for (offset, byte) in b"MiXeD\0".iter().copied().enumerate() {
-        assert_eq!(
-            sys.mem
-                .get(0x0900_u16.strict_add(u16::try_from(offset).unwrap())),
-            byte
-        );
-    }
+    assert_eq!(stored_string(&mut sys, b'A'), b"MiXeD");
     assert_eq!(sys.mem.get(0x9006), 21);
     assert_eq!(sys.mem.get(0x0802), 3);
     assert_eq!(sys.mem.get(0x0300), 7);
@@ -51,7 +58,7 @@ fn strings_and_len_work_in_integer_expressions_and_guest_ram() {
 #[test]
 fn string_input_preserves_case_spaces_quotes_and_punctuation() {
     let input = "  MiXeD, \"quote\" +\t  ";
-    let (sys, outputs) = session(&format!(
+    let (mut sys, outputs) = session(&format!(
         "INPUT Z$\n{input}\nINPUT B$\n\nPRINT \"[\"+Z$+\"]\",LEN(Z$),\"[\"+B$+\"]\",LEN(B$)\nQUIT\n"
     ));
     for output in outputs {
@@ -60,13 +67,7 @@ fn string_input_preserves_case_spaces_quotes_and_punctuation() {
             "{output}"
         );
     }
-    for (offset, byte) in input.bytes().chain([0]).enumerate() {
-        assert_eq!(
-            sys.mem
-                .get(0x0F40_u16.strict_add(u16::try_from(offset).unwrap())),
-            byte
-        );
-    }
+    assert_eq!(stored_string(&mut sys, b'Z'), input.as_bytes());
 }
 
 #[test]
@@ -101,27 +102,23 @@ fn strings_compare_lexically_and_case_sensitively() {
 
 #[test]
 fn failed_string_assignments_leave_existing_values_intact() {
-    let full = "x".repeat(63);
+    let full = "x".repeat(255);
     for (statement, cause) in [
         ("A$=A$+\"x\"".to_owned(), "string too long"),
-        (format!("A$=\"{full}x\""), "string too long"),
-        (format!("INPUT A$\n{}", "y".repeat(64)), "string too long"),
+        (format!("INPUT A$\n{}", "y".repeat(256)), "string too long"),
         ("A$=7".to_owned(), "type mismatch"),
         ("A$=\"ok\"+1".to_owned(), "type mismatch"),
         ("A$=\"\u{e9}\"".to_owned(), "invalid string character"),
         ("A$=(\"oops\"".to_owned(), "expected )"),
     ] {
-        let (sys, outputs) = session(&format!(
-            "A$=\"{full}\"\nB$=\"safe\"\n{statement}\nPRINT LEN(A$),B$\nQUIT\n"
+        let (mut sys, outputs) = session(&format!(
+            "INPUT A$\n{full}\nB$=\"safe\"\n{statement}\nPRINT LEN(A$),B$\nQUIT\n"
         ));
         for output in outputs {
             assert!(output.to_ascii_lowercase().contains(cause), "{output}");
-            assert!(output.contains("63\tsafe\n"), "{output}");
+            assert!(output.contains("255\tsafe\n"), "{output}");
         }
-        for address in 0x0900_u16..0x093F {
-            assert_eq!(sys.mem.get(address), b'x');
-        }
-        assert_eq!(sys.mem.get(0x093F), 0);
+        assert_eq!(stored_string(&mut sys, b'A'), full.as_bytes());
     }
 }
 
@@ -137,7 +134,6 @@ fn len_rejects_wrong_types_and_reports_program_line() {
         ("A(0)=\"x\"", "type mismatch"),
         ("IF 1=\"x\" THEN END", "type mismatch"),
         ("IF \"x\"=1 THEN END", "type mismatch"),
-        ("DIM A$(1)", "string arrays not supported"),
     ] {
         let (_, outputs) = session(&format!(
             "10 DIM A(0)\n20 {statement}\nRUN\nPRINT 99\nQUIT\n"
@@ -166,7 +162,7 @@ fn strings_reset_on_run_and_new_without_reducing_array_capacity() {
 }
 
 #[test]
-fn all_string_slots_can_be_full_alongside_a_full_array_pool() {
+fn all_string_scalars_coexist_with_a_full_array_pool() {
     let assignments = (b'A'..=b'Z')
         .map(|name| {
             let letter = char::from(name);
@@ -174,7 +170,7 @@ fn all_string_slots_can_be_full_alongside_a_full_array_pool() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let (sys, outputs) = session(&format!(
+    let (mut sys, outputs) = session(&format!(
         "DIM A(2047)\nA(2047)=123\n{assignments}\nZ$=Z$+\"\"\nPRINT LEN(A),A(2047),LEN(A$),LEN(Z$)\nQUIT\n"
     ));
     for output in outputs {
@@ -182,9 +178,6 @@ fn all_string_slots_can_be_full_alongside_a_full_array_pool() {
         assert!(!output.contains("? "), "{output}");
     }
     for name in b'A'..=b'Z' {
-        let base = 0x0900_u16.strict_add(u16::from(name.strict_sub(b'A')).strict_mul(64));
-        assert_eq!(sys.mem.get(base), name);
-        assert_eq!(sys.mem.get(base.strict_add(62)), name);
-        assert_eq!(sys.mem.get(base.strict_add(63)), 0);
+        assert_eq!(stored_string(&mut sys, name), vec![name; 63]);
     }
 }

@@ -18,6 +18,7 @@ otherwise agree.
 | [data_table.bas](data_table.bas) | Mixed string/integer `DATA`, array `READ`, `RESTORE` | Loads 12 values, reports total 243 and target 240 |
 | [memory.bas](memory.bas) | `POKE`, `PEEK`, computed addresses | Writes squares 0–49 to bytes 256–263 and reads them back |
 | [dice.bas](dice.bas) | Optional random device, `RANDOMIZE`, `RND` | Ten die rolls, each from 1 to 6; requires `--random-device` |
+| [rooms.bas](rooms.bas) | String arrays, reassignment, compaction | Prints `Entrance` and `Garden` |
 | [greeting.bas](greeting.bas) | String `INPUT`, concatenation, comparison, `LEN` for strings and arrays | Input Ada produces `Hello, Ada!`, length 11, 4 array elements, last square 9 |
 | [squares.bas](squares.bas) | `INPUT`, multiplication, `FOR` | Input 5 produces squares 1, 4, 9, 16, 25 |
 | [fibonacci.bas](fibonacci.bas) | Assignments, addition, loop state | Terms 0 through 15, ending at 610 |
@@ -28,8 +29,8 @@ otherwise agree.
 All examples use single-letter variable names and signed 16-bit numeric values. Squares fit
 for inputs up to 181; larger inputs eventually overflow. The GCD example accepts
 positive integers from 1 to 32767 and rejects nonpositive inputs.
-The greeting accepts an empty name as `friend`; names of up to 55 characters
-leave room for the greeting within the 63-character string limit.
+The greeting accepts an empty name as `friend`; names of up to 247 characters
+leave room for the greeting within the 255-character string limit.
 
 For input-driven examples, enter values when prompted or pipe them:
 
@@ -82,9 +83,9 @@ With Fibonacci instead, variable A at `0300` ends as `DB 03` (**987**), B and C
 as `3D 06` (**1597**), and I at `0310` as `10 00` (**16**). The last *printed*
 term is 610; assignments advance the state once more before the loop exits.
 
-Use `--step` instead of `--break-before-run` to stop at BASIC ROM entry (`D000`).
-Then `B D000`, `G`, and `S` demonstrate stopping before an instruction and
-stepping over it. `B` lists breakpoints, `BC D000` removes one, and `BC` clears
+Use `--step` instead of `--break-before-run` to stop at BASIC ROM entry (`C100`).
+Then `B C100`, `G`, and `S` demonstrate stopping before an instruction and
+stepping over it. `B` lists breakpoints, `BC C100` removes one, and `BC` clears
 all. Breakpoints use hexadecimal machine-code addresses, not BASIC line numbers.
 
 Guest output is displayed in monitor mode. For an input-driven example such as
@@ -97,6 +98,7 @@ leaving the monitor. `Q` exits; `I QUIT` followed by `G` halts the guest.
 ```sh
 cargo test -p rx82 --test basic_examples
 cargo test -p rx82 --test basic_random
+cargo test -p rx82 --test basic_string_pool
 ```
 
 These tests run the actual files through both interpreters, check their output

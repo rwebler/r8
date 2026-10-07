@@ -5,11 +5,12 @@
 ; 00A6..AC file transfer state (LOAD validates before replacing the program).
 ; RAM: 0080 current line, 0082 running, 0084 next line pointer.
 ; 0200 input buffer (128 bytes), 0300 variables (26 little-endian words).
-; 0800 array descriptors; 0900..0FFF strings and expression buffers.
+; 0800 integer arrays, 0870 string arrays; 0340 scalar string offsets.
+; 0900..0FFF scratch; EF00..FEFF string pool and temporary stack.
 ; 9000..9FFF integer array elements; 00B0 array allocation pointer.
 ; 1000..8FFF: 256 records of 128 bytes: line word, NUL-terminated text.
 ; A zero line number marks a free record. Stack grows down from BFFF.
-    org 0xD000
+    org 0xC100
 BOOT:
     ld sp, 0xBFFF
     call NEW_PROGRAM
@@ -17,6 +18,9 @@ BOOT:
     ld cd, BANNER
     call PUTS
 PROMPT:
+    ld ab, 0xFF00
+    ld 0x00B6, b
+    ld 0x00B7, a
     ld sp, 0xBFFF
     ld a, 0x00
     ld 0x0082, a
@@ -52,6 +56,11 @@ DIRECT:
     jmp PROMPT
 ; Command dispatch. MATCH advances GH only on success.
 STATEMENT:
+    call POOL_BEGIN
+    call STATEMENT_BODY
+    call STACK_RESET
+    ret
+STATEMENT_BODY:
     call SPACE
     cmp a, 0x00
     bne LONG_45
@@ -470,8 +479,7 @@ PRINT_ITEM:
     call IS_STRING
     beq PRINT_VALUE
     call STRING_EXPRESSION
-    ld cd, 0x0F80
-    call PUTS
+    call PRINT_STACK_STRING
     jmp PRINT_AFTER
 PRINT_VALUE:
     call EXPR
@@ -1056,6 +1064,13 @@ MATCH_FAIL:
     cmp a, 0x00
     ret
 READLINE:
+    ld a, 0x00
+    ld 0x00D0, a
+    jmp READLINE_START
+READLINE_STRING:
+    ld a, 0x01
+    ld 0x00D0, a
+READLINE_START:
     ld gh, 0x0200
 READLINE_NEXT:
     call GETCHAR
@@ -1080,6 +1095,17 @@ LONG_781:
     jmp BAD_INPUT_CHARACTER
 LONG_783:
 READLINE_STORE:
+    push cd
+    ld cd, 0x00D0
+    ld b, (cd)
+    pop cd
+    cmp b, 0x00
+    beq READLINE_SHORT_LIMIT
+    cmp gh, 0x02FF
+    bcc LONG_786
+    ld cd, STRING_TOO_LONG_TEXT
+    jmp DISCARD_INPUT_LINE
+READLINE_SHORT_LIMIT:
     cmp gh, 0x027A
     bcc LONG_786
     jmp INPUT_TOO_LONG
@@ -1260,17 +1286,14 @@ IF:
     call IS_STRING
     beq IF_INTEGER_LEFT
     call STRING_EXPRESSION
-    ld cd, 0x0F80
-    ld ef, 0x0FC0
-    call COPY_STRING
     ld a, 0x01
-    ld 0x00B2, a
+    ld 0x00BF, a
     jmp IF_LEFT_READY
 IF_INTEGER_LEFT:
     call EXPR
     push ab
     ld a, 0x00
-    ld 0x00B2, a
+    ld 0x00BF, a
     pop ab
 IF_LEFT_READY:
     push ab
@@ -1317,14 +1340,12 @@ IF_OPERATOR_DONE:
     inc gh
 IF_RIGHT:
     push b
-    ld cd, 0x00B2
+    ld cd, 0x00BF
     ld a, (cd)
     cmp a, 0x00
     beq IF_INTEGER_RIGHT
     call STRING_EXPRESSION
-    ld cd, 0x0FC0
-    ld ef, 0x0F80
-    call COMPARE_STRINGS
+    call COMPARE_STACK_STRINGS
     pop d
     pop ab
     jmp IF_COMPARED
@@ -2077,7 +2098,7 @@ HELP_TEXT:
     data "LET PRINT INPUT IF THEN GOTO GOSUB RETURN FOR TO STEP NEXT END", 0x0A
     data "A-Z variables, signed 16-bit integers, + - * / and parentheses", 0x0A
     data "DIM A(100): indices 0..100; 2048 array elements total", 0x0A
-    data "A$..Z$: 63 ASCII characters, + joins strings; LEN(A$) or LEN(A)", 0x0A
+    data "A$..Z$: 255 ASCII characters, DIM A$(N), +, LEN; 4096-byte pool", 0x0A
     data "DATA constants; READ A,A(I),A$; RESTORE [line]", 0x0A
     data "PEEK(address), POKE address,byte: RX-82 RAM, ROM and devices", 0x0A
     data "RND(n): 0..n-1; RANDOMIZE [seed] (requires --random-device)", 0x0A, 0x00
@@ -2256,7 +2277,7 @@ CLEAR_ARRAYS:
 CLEAR_ARRAY_DESCRIPTOR:
     ld (cd), a
     inc cd
-    cmp cd, 0x0868
+    cmp cd, 0x08D8
     bne CLEAR_ARRAY_DESCRIPTOR
     ld ab, 0x9000
     ld 0x00B0, b
@@ -2292,6 +2313,7 @@ LOCATION_INTEGER:
     ret
 LOCATION_ARRAY:
     call ARRAY_DESCRIPTOR
+LOCATION_SUBSCRIPT:
     push cd
     inc gh
     call EXPR
@@ -2335,8 +2357,14 @@ DIM:
     call PEEK
     cmp a, 0x24
     bne DIM_INTEGER_ARRAY
-    jmp STRING_ARRAYS_UNSUPPORTED
+    inc gh
+    call ARRAY_DESCRIPTOR
+    clc
+    add cd, 0x0070
+    jmp DIM_DESCRIPTOR_READY
 DIM_INTEGER_ARRAY:
+    call ARRAY_DESCRIPTOR
+DIM_DESCRIPTOR_READY:
     push cd
     call SPACE
     cmp a, 0x28
@@ -2359,7 +2387,6 @@ DIM_CLOSE:
     bcc DIM_NONNEGATIVE
     jmp BAD_SUBSCRIPT
 DIM_NONNEGATIVE:
-    call ARRAY_DESCRIPTOR
     ld f, (cd)
     ld e, (cd+0x01)
     cmp ef, 0x0000
@@ -2429,19 +2456,6 @@ EXPECTED_LPAREN:
 EXPECTED_LPAREN_TEXT:
     data "? EXPECTED (", 0x00
 
-; Strings: A$..Z$ have 64-byte slots at 0900..0F7F, including a NUL.
-; 0F80..0FBF is the expression buffer; 0FC0..0FFF holds IF's left operand.
-; 00B2 selects IF operand type. Strings never allocate from the array pool.
-CLEAR_STRINGS:
-    ld cd, 0x0900
-    ld a, 0x00
-CLEAR_STRING_BYTE:
-    ld (cd), a
-    inc cd
-    cmp cd, 0x1000
-    bne CLEAR_STRING_BYTE
-    jmp RESET_DATA
-
 ; Look through leading parentheses, without consuming source. Z means numeric.
 ; Preserves CD/EF/GH; AB is scratch.
 IS_STRING:
@@ -2473,7 +2487,168 @@ IS_STRING_DONE:
     cmp a, 0x00
     ret
 
-; Parse A$..Z$, returning the string slot in CD.
+; Scalars A$..Z$: one-based pool offsets at 0340..0373.
+; Length-prefixed records live in EF00..FEFF. Free records are 0,length.
+; 00B2 bump, 00B6 temporary top, 00B8 statement mark, 00C0 dirty.
+CLEAR_STRINGS:
+    ld cd, 0x0340
+    ld a, 0x00
+CLEAR_STRING_OFFSET:
+    ld (cd), a
+    inc cd
+    cmp cd, 0x0374
+    bne CLEAR_STRING_OFFSET
+    ld 0x00C0, a
+    ld ab, 0xEF00
+    ld 0x00B2, b
+    ld 0x00B3, a
+    ld ab, 0xFF00
+    ld 0x00B6, b
+    ld 0x00B7, a
+    ld 0x00B8, b
+    ld 0x00B9, a
+    jmp RESET_DATA
+POOL_BEGIN:
+    ld cd, 0x00B6
+    ld b, (cd)
+    ld a, (cd+0x01)
+    cmp ab, 0xFF00
+    bne POOL_MARK
+    ld cd, 0x00C0
+    ld a, (cd)
+    cmp a, 0x00
+    beq POOL_MARK
+    call POOL_COMPACT
+POOL_MARK:
+    ld cd, 0x00B6
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld 0x00B8, b
+    ld 0x00B9, a
+    ret
+STACK_RESET:
+    ld cd, 0x00B8
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld 0x00B6, b
+    ld 0x00B7, a
+    ret
+STACK_TOP:
+    ld cd, 0x00B6
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld cd, ab
+    ret
+STACK_POP:
+    push ab
+    push cd
+    call STACK_TOP
+    ld b, (cd)
+    ld a, 0x00
+    inc ab
+    clc
+    add cd, ab
+    ld 0x00B6, d
+    ld 0x00B7, c
+    pop cd
+    pop ab
+    ret
+; Copy the length-prefixed record at CD onto the temporary stack.
+STACK_PUSH:
+    push gh
+    ld b, (cd)
+    ld a, 0x00
+    inc ab
+    ld gh, ab
+    ld ef, 0x00B6
+    ld b, (ef)
+    ld a, (ef+0x01)
+    sec
+    sub ab, gh
+    ld ef, ab
+    push cd
+    ld cd, 0x00B2
+    ld b, (cd)
+    ld a, (cd+0x01)
+    pop cd
+    cmp ef, ab
+    bcc STACK_SPACE_ERROR
+    beq STACK_SPACE_ERROR
+    ld 0x00B6, f
+    ld 0x00B7, e
+STACK_PUSH_COPY:
+    ld a, (cd)
+    ld (ef), a
+    inc cd
+    inc ef
+    dec gh
+    bne STACK_PUSH_COPY
+    pop gh
+    ret
+STACK_SPACE_ERROR:
+    jmp STRING_SPACE
+; Scratch text is NUL terminated; stable and temporary records are not.
+STACK_FROM_SCRATCH:
+    ld cd, 0x0901
+    ld b, 0x00
+STACK_SCRATCH_LENGTH:
+    ld a, (cd)
+    cmp a, 0x00
+    beq STACK_SCRATCH_READY
+    inc b
+    inc cd
+    jmp STACK_SCRATCH_LENGTH
+STACK_SCRATCH_READY:
+    ld 0x0900, b
+    ld cd, 0x0900
+    jmp STACK_PUSH
+; Copy B bytes from CD to EF. GH is untouched.
+COPY_STRING_BYTES:
+    cmp b, 0x00
+    beq COPY_STRING_DONE
+COPY_STRING_BYTE:
+    ld a, (cd)
+    ld (ef), a
+    inc cd
+    inc ef
+    dec b
+    bne COPY_STRING_BYTE
+COPY_STRING_DONE:
+    ret
+STRING_JOIN:
+    push gh
+    call STACK_TOP
+    ld gh, cd
+    ld b, (cd)
+    ld a, 0x00
+    inc ab
+    clc
+    add cd, ab
+    ld b, (cd)
+    ld a, 0x00
+    ld ef, ab
+    ld b, (gh)
+    clc
+    add ab, ef
+    cmp ab, 0x0100
+    bcc STRING_JOIN_FITS
+    jmp STRING_TOO_LONG
+STRING_JOIN_FITS:
+    ld 0x0B00, b
+    ld b, (cd)
+    inc cd
+    ld ef, 0x0B01
+    call COPY_STRING_BYTES
+    ld cd, gh
+    ld b, (cd)
+    inc cd
+    call COPY_STRING_BYTES
+    call STACK_POP
+    call STACK_POP
+    ld cd, 0x0B00
+    call STACK_PUSH
+    pop gh
+    ret
 STRING_VARIABLE:
     call VARIABLE
     call PEEK
@@ -2482,31 +2657,24 @@ STRING_VARIABLE:
     jmp TYPE_MISMATCH
 STRING_VARIABLE_SUFFIX:
     inc gh
-    ld ab, cd
-    sec
-    sub ab, 0x0300
+    push cd
+    call SPACE
+    pop cd
+    cmp a, 0x28
+    beq STRING_ARRAY_LOCATION
     clc
-    add ab, ab
-    clc
-    add ab, ab
-    clc
-    add ab, ab
-    clc
-    add ab, ab
-    clc
-    add ab, ab
-    clc
-    add ab, 0x0900
-    ld cd, ab
+    add cd, 0x0040
     ret
-
-; Build a complete string before changing a variable. CD/EF are preserved.
+STRING_ARRAY_LOCATION:
+    call ARRAY_DESCRIPTOR
+    clc
+    add cd, 0x0070
+    push ef
+    jmp LOCATION_SUBSCRIPT
 STRING_EXPRESSION:
     push cd
     push ef
-    ld ef, 0x0F80
     call STRING_SEQUENCE
-    ld (ef), 0x00
     pop ef
     pop cd
     ret
@@ -2516,11 +2684,14 @@ STRING_SEQUENCE:
     jmp EXPRESSION_TOO_DEEP
 STRING_DEPTH_OK:
     call STRING_ATOM
+STRING_SEQUENCE_MORE:
     call SPACE
     cmp a, 0x2B
     bne STRING_SEQUENCE_DONE
     inc gh
-    jmp STRING_SEQUENCE
+    call STRING_ATOM
+    call STRING_JOIN
+    jmp STRING_SEQUENCE_MORE
 STRING_SEQUENCE_DONE:
     ret
 STRING_ATOM:
@@ -2534,15 +2705,18 @@ STRING_ATOM:
     jmp TYPE_MISMATCH
 STRING_NAMED:
     call STRING_VARIABLE
-STRING_VARIABLE_BYTE:
-    ld a, (cd)
-    cmp a, 0x00
-    beq STRING_ATOM_DONE
-    call STRING_APPEND
-    inc cd
-    jmp STRING_VARIABLE_BYTE
-STRING_ATOM_DONE:
-    ret
+    ld b, (cd)
+    ld a, (cd+0x01)
+    cmp ab, 0x0000
+    beq STRING_EMPTY
+    clc
+    add ab, 0xEEFF
+    ld cd, ab
+    jmp STACK_PUSH
+STRING_EMPTY:
+    ld cd, 0x0900
+    ld (cd), 0x00
+    jmp STACK_PUSH
 STRING_PAREN:
     inc gh
     call STRING_SEQUENCE
@@ -2555,6 +2729,7 @@ STRING_PAREN_CLOSE:
     ret
 STRING_LITERAL:
     inc gh
+    ld ef, 0x0901
 STRING_LITERAL_BYTE:
     ld a, (gh)
     inc gh
@@ -2563,11 +2738,12 @@ STRING_LITERAL_BYTE:
     jmp UNTERMINATED_STRING
 STRING_LITERAL_NOT_END:
     cmp a, 0x22
-    beq STRING_ATOM_DONE
+    beq STRING_LITERAL_END
     call STRING_APPEND
     jmp STRING_LITERAL_BYTE
-
-; Append ASCII A to scratch at EF, allowing at most 63 bytes plus NUL.
+STRING_LITERAL_END:
+    ld (ef), 0x00
+    jmp STACK_FROM_SCRATCH
 STRING_APPEND:
     cmp a, 0x09
     beq STRING_APPEND_VALID
@@ -2579,22 +2755,12 @@ STRING_APPEND_PRINTABLE:
     bcc STRING_APPEND_VALID
     jmp INVALID_STRING_CHARACTER
 STRING_APPEND_VALID:
-    cmp ef, 0x0FBF
+    cmp ef, 0x0A00
     bcc STRING_APPEND_FITS
     jmp STRING_TOO_LONG
 STRING_APPEND_FITS:
     ld (ef), a
     inc ef
-    ret
-
-; Copy a validated NUL-terminated string from CD to EF. GH is untouched.
-COPY_STRING:
-    ld a, (cd)
-    ld (ef), a
-    inc cd
-    inc ef
-    cmp a, 0x00
-    bne COPY_STRING
     ret
 ASSIGN_STRING:
     call STRING_VARIABLE
@@ -2608,8 +2774,7 @@ ASSIGN_STRING_VALUE:
     call STRING_EXPRESSION
     call EOL
     pop ef
-    ld cd, 0x0F80
-    jmp COPY_STRING
+    jmp POOL_STORE
 INPUT_STRING:
     call STRING_VARIABLE
     push cd
@@ -2618,9 +2783,9 @@ INPUT_STRING:
     call PUTCHAR
     ld a, 0x20
     call PUTCHAR
-    call READLINE
+    call READLINE_STRING
     ld gh, 0x0200
-    ld ef, 0x0F80
+    ld ef, 0x0901
 INPUT_STRING_BYTE:
     ld a, (gh)
     cmp a, 0x00
@@ -2630,28 +2795,321 @@ INPUT_STRING_BYTE:
     jmp INPUT_STRING_BYTE
 INPUT_STRING_END:
     ld (ef), 0x00
+    call STACK_FROM_SCRATCH
     pop ef
-    ld cd, 0x0F80
-    jmp COPY_STRING
-
-; Bytewise, case-sensitive string comparison; C=1 less, 2 equal, 4 greater.
-COMPARE_STRINGS:
+    jmp POOL_STORE
+PRINT_STACK_STRING:
+    call STACK_TOP
+    ld b, (cd)
+    inc cd
+    cmp b, 0x00
+    beq PRINT_STACK_DONE
+PRINT_STACK_BYTE:
+    ld a, (cd)
+    call PUTCHAR
+    inc cd
+    dec b
+    bne PRINT_STACK_BYTE
+PRINT_STACK_DONE:
+    jmp STACK_POP
+COMPARE_STACK_STRINGS:
+    push gh
+    call STACK_TOP
+    ld ef, cd
+    ld b, (cd)
+    ld a, 0x00
+    inc ab
+    clc
+    add cd, ab
+    ld g, (cd)
+    ld h, (ef)
+    inc cd
+    inc ef
+    call COMPARE_STRING_BYTES
+    pop gh
+    call STACK_POP
+    call STACK_POP
+    ret
+COMPARE_STRING_BYTES:
+    cmp g, 0x00
+    bne COMPARE_STRING_LEFT
+    cmp h, 0x00
+    bne COMPARE_STRING_LESS
+    jmp COMP_EQUAL
+COMPARE_STRING_LEFT:
+    cmp h, 0x00
+    beq COMPARE_STRING_GREATER
     ld a, (cd)
     ld b, (ef)
     cmp a, b
-    bcs COMPARE_STRINGS_NOT_LESS
-    jmp COMP_LESS
-COMPARE_STRINGS_NOT_LESS:
-    beq COMPARE_STRINGS_EQUAL_BYTE
-    jmp COMP_GREATER
-COMPARE_STRINGS_EQUAL_BYTE:
-    cmp a, 0x00
-    bne COMPARE_STRINGS_NEXT
-    jmp COMP_EQUAL
-COMPARE_STRINGS_NEXT:
+    bcc COMPARE_STRING_LESS
+    bne COMPARE_STRING_GREATER
     inc cd
     inc ef
-    jmp COMPARE_STRINGS
+    dec g
+    dec h
+    jmp COMPARE_STRING_BYTES
+COMPARE_STRING_LESS:
+    jmp COMP_LESS
+COMPARE_STRING_GREATER:
+    jmp COMP_GREATER
+; Copy top temporary into a stable allocation before freeing the old record.
+; EF identifies a scalar offset or string-array element.
+POOL_STORE:
+    push ef
+    call STACK_TOP
+    ld b, (cd)
+    cmp b, 0x00
+    beq POOL_STORE_EMPTY
+    call POOL_ALLOC
+    ld ab, cd
+    sec
+    sub ab, 0xEEFF
+    ld 0x00C2, b
+    ld 0x00C3, a
+    ld ef, cd
+    call STACK_TOP
+    ld b, (cd)
+    ld a, (cd)
+    ld (ef), a
+    inc cd
+    inc ef
+    call COPY_STRING_BYTES
+    jmp POOL_STORE_COMMIT
+POOL_STORE_EMPTY:
+    ld a, 0x00
+    ld 0x00C2, a
+    ld 0x00C3, a
+POOL_STORE_COMMIT:
+    pop cd
+    ld b, (cd)
+    ld a, (cd+0x01)
+    push ab
+    ld ef, 0x00C2
+    ld b, (ef)
+    ld a, (ef+0x01)
+    ld (cd), b
+    ld (cd+0x01), a
+    pop ab
+    cmp ab, 0x0000
+    beq POOL_STORE_DONE
+    clc
+    add ab, 0xEEFF
+    ld cd, ab
+    ld a, (cd)
+    ld (cd), 0x00
+    ld (cd+0x01), a
+    ld a, 0x01
+    ld 0x00C0, a
+POOL_STORE_DONE:
+    jmp STACK_POP
+; B is requested length; CD receives its record. Preserve EF/GH.
+POOL_ALLOC:
+    push ef
+    push gh
+    ld 0x00C1, b
+    ld a, 0x00
+    inc ab
+    ld gh, ab
+    ld cd, 0x00B2
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, 0xEF00
+POOL_ALLOC_SCAN:
+    cmp cd, ef
+    beq POOL_ALLOC_BUMP
+    ld a, (cd)
+    cmp a, 0x00
+    beq POOL_ALLOC_FREE
+    ld b, a
+    ld a, 0x00
+    inc ab
+    clc
+    add cd, ab
+    jmp POOL_ALLOC_SCAN
+POOL_ALLOC_FREE:
+    ld b, (cd+0x01)
+    ld a, 0x00
+    inc ab
+    cmp ab, gh
+    bcc POOL_ALLOC_SKIP
+    beq POOL_ALLOC_READY
+    sec
+    sub ab, gh
+    cmp ab, 0x0001
+    beq POOL_ALLOC_ONE_BYTE
+    ld ef, cd
+    clc
+    add ef, gh
+    dec ab
+    ld (ef), 0x00
+    ld (ef+0x01), b
+    jmp POOL_ALLOC_READY
+POOL_ALLOC_ONE_BYTE:
+    clc
+    add ab, gh
+POOL_ALLOC_SKIP:
+    clc
+    add cd, ab
+    jmp POOL_ALLOC_SCAN
+POOL_ALLOC_BUMP:
+    ld ab, cd
+    clc
+    add ab, gh
+    ld ef, 0x00B6
+    ld f, (ef)
+    ; Loading F changes EF, so obtain the high byte through a separate pointer.
+    push cd
+    ld cd, 0x00B7
+    ld e, (cd)
+    pop cd
+    cmp ab, ef
+    bcc POOL_ALLOC_BUMP_OK
+    jmp STRING_SPACE
+POOL_ALLOC_BUMP_OK:
+    ld 0x00B2, b
+    ld 0x00B3, a
+POOL_ALLOC_READY:
+    ld ef, 0x00C1
+    ld a, (ef)
+    ld (cd), a
+    pop gh
+    pop ef
+    ret
+; No temporary records may exist while offsets are rewritten.
+POOL_COMPACT:
+    push ab
+    push cd
+    push ef
+    push gh
+    ld cd, 0x00B2
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld 0x00C8, b
+    ld 0x00C9, a
+    ld gh, 0xEF00
+    ld ef, 0xEF00
+POOL_COMPACT_NEXT:
+    ld cd, 0x00C8
+    ld b, (cd)
+    ld a, (cd+0x01)
+    cmp gh, ab
+    beq POOL_COMPACT_DONE
+    ld a, (gh)
+    cmp a, 0x00
+    bne POOL_COMPACT_LIVE
+    ld b, (gh+0x01)
+    ld a, 0x00
+    inc ab
+    clc
+    add gh, ab
+    jmp POOL_COMPACT_NEXT
+POOL_COMPACT_LIVE:
+    ld b, a
+    ld a, 0x00
+    inc ab
+    cmp gh, ef
+    beq POOL_COMPACT_UNMOVED
+    push ab
+    ld ab, gh
+    sec
+    sub ab, 0xEEFF
+    ld 0x00C4, b
+    ld 0x00C5, a
+    ld ab, ef
+    sec
+    sub ab, 0xEEFF
+    ld 0x00C6, b
+    ld 0x00C7, a
+    call POOL_REWRITE
+    pop cd
+POOL_COMPACT_COPY:
+    ld a, (gh)
+    ld (ef), a
+    inc gh
+    inc ef
+    dec cd
+    bne POOL_COMPACT_COPY
+    jmp POOL_COMPACT_NEXT
+POOL_COMPACT_UNMOVED:
+    clc
+    add gh, ab
+    clc
+    add ef, ab
+    jmp POOL_COMPACT_NEXT
+POOL_COMPACT_DONE:
+    ld 0x00B2, f
+    ld 0x00B3, e
+    ld a, 0x00
+    ld 0x00C0, a
+    pop gh
+    pop ef
+    pop cd
+    pop ab
+    ret
+POOL_REWRITE:
+    push gh
+    push ef
+    ld cd, 0x00C4
+    ld h, (cd)
+    ld g, (cd+0x01)
+    ld cd, 0x0340
+POOL_REWRITE_SCALAR:
+    call POOL_REWRITE_WORD
+    inc cd
+    inc cd
+    cmp cd, 0x0374
+    bne POOL_REWRITE_SCALAR
+    ld cd, 0x0870
+POOL_REWRITE_ARRAY:
+    ld f, (cd)
+    ld e, (cd+0x01)
+    cmp ef, 0x0000
+    beq POOL_REWRITE_NEXT_ARRAY
+    push cd
+    push ef
+    ld b, (cd+0x02)
+    ld a, (cd+0x03)
+    inc ab
+    clc
+    add ab, ab
+    clc
+    add ef, ab
+    pop cd
+POOL_REWRITE_ELEMENT:
+    call POOL_REWRITE_WORD
+    inc cd
+    inc cd
+    cmp cd, ef
+    bne POOL_REWRITE_ELEMENT
+    pop cd
+POOL_REWRITE_NEXT_ARRAY:
+    clc
+    add cd, 0x0004
+    cmp cd, 0x08D8
+    bne POOL_REWRITE_ARRAY
+    pop ef
+    pop gh
+    ret
+POOL_REWRITE_WORD:
+    ld b, (cd)
+    ld a, (cd+0x01)
+    cmp ab, gh
+    bne POOL_REWRITE_WORD_DONE
+    push ef
+    ld ef, 0x00C6
+    ld b, (ef)
+    ld a, (ef+0x01)
+    ld (cd), b
+    ld (cd+0x01), a
+    pop ef
+POOL_REWRITE_WORD_DONE:
+    ret
+STRING_SPACE:
+    ld cd, STRING_SPACE_TEXT
+    jmp REPORT_ERROR
+STRING_SPACE_TEXT:
+    data "? STRING SPACE", 0x00
 
 ; LEN(string expression) or LEN(bare array name), returned as a signed integer.
 KW_LEN:
@@ -2665,16 +3123,40 @@ LENGTH_OPEN:
     inc gh
     call IS_STRING
     beq LENGTH_ARRAY
+    ; A bare dimensioned A$ denotes its array count, otherwise its scalar.
+    push gh
+    call SPACE
+    cmp a, 0x41
+    bcc LENGTH_STRING_EXPRESSION
+    cmp a, 0x5B
+    bcs LENGTH_STRING_EXPRESSION
+    call VARIABLE
+    call PEEK
+    cmp a, 0x24
+    bne LENGTH_STRING_EXPRESSION
+    inc gh
+    push cd
+    call SPACE
+    pop cd
+    cmp a, 0x29
+    bne LENGTH_STRING_EXPRESSION
+    call ARRAY_DESCRIPTOR
+    clc
+    add cd, 0x0070
+    ld f, (cd)
+    ld e, (cd+0x01)
+    cmp ef, 0x0000
+    beq LENGTH_STRING_EXPRESSION
+    pop ab
+    jmp LENGTH_ARRAY_DIMENSIONED
+LENGTH_STRING_EXPRESSION:
+    pop gh
     call STRING_EXPRESSION
-    ld cd, 0x0F80
-    ld b, 0x00
-LENGTH_STRING_BYTE:
-    ld a, (cd)
-    cmp a, 0x00
-    beq LENGTH_CLOSE
-    inc b
-    inc cd
-    jmp LENGTH_STRING_BYTE
+    call STACK_TOP
+    ld b, (cd)
+    ld a, 0x00
+    call STACK_POP
+    jmp LENGTH_CLOSE
 LENGTH_ARRAY:
     call SPACE
     cmp a, 0x41
@@ -2728,14 +3210,8 @@ INVALID_STRING_CHARACTER:
     jmp REPORT_ERROR
 INVALID_STRING_CHARACTER_TEXT:
     data "? INVALID STRING CHARACTER", 0x00
-STRING_ARRAYS_UNSUPPORTED:
-    ld cd, STRING_ARRAYS_UNSUPPORTED_TEXT
-    jmp REPORT_ERROR
-STRING_ARRAYS_UNSUPPORTED_TEXT:
-    data "? STRING ARRAYS NOT SUPPORTED", 0x00
-
-; DATA cursor: 00B4 last scanned line, 00B6 next item address (zero: scan).
-; 00B8 quoted flag; 00BA candidate next address, committed after assignment.
+; DATA cursor: 00B4 last scanned line, 00BC next item address (zero: scan).
+; 00BE quoted flag; 00BA candidate next address, committed after assignment.
 KW_DATA:
     data "DATA", 0x00
 KW_READ:
@@ -2746,8 +3222,8 @@ RESET_DATA:
     ld a, 0x00
     ld 0x00B4, a
     ld 0x00B5, a
-    ld 0x00B6, a
-    ld 0x00B7, a
+    ld 0x00BC, a
+    ld 0x00BD, a
     ret
 RESTORE_DATA:
     call SPACE
@@ -2786,8 +3262,8 @@ RESTORE_EXACT:
     ld 0x00B4, b
     ld 0x00B5, a
     ld a, 0x00
-    ld 0x00B6, a
-    ld 0x00B7, a
+    ld 0x00BC, a
+    ld 0x00BD, a
     ret
 
 READ_DATA:
@@ -2799,9 +3275,9 @@ READ_DATA:
     push gh
     call DATA_ITEM
     pop gh
+    call STACK_FROM_SCRATCH
     pop ef
-    ld cd, 0x0F80
-    call COPY_STRING
+    call POOL_STORE
     jmp READ_COMMIT
 READ_INTEGER:
     call LOCATION
@@ -2817,9 +3293,9 @@ READ_INTEGER:
 READ_COMMIT:
     ld cd, 0x00BA
     ld a, (cd)
-    ld 0x00B6, a
+    ld 0x00BC, a
     ld a, (cd+0x01)
-    ld 0x00B7, a
+    ld 0x00BD, a
     call SPACE
     cmp a, 0x2C
     beq READ_ANOTHER
@@ -2839,7 +3315,7 @@ READ_TARGET_OK:
 
 ; Locate the next DATA item, retaining its address until READ succeeds.
 DATA_ITEM:
-    ld cd, 0x00B6
+    ld cd, 0x00BC
     ld h, (cd)
     ld g, (cd+0x01)
     cmp gh, 0x0000
@@ -2863,17 +3339,17 @@ DATA_SCAN_LINE:
     ld cd, KW_DATA
     call MATCH
     bne DATA_SCAN
-    ld 0x00B6, h
-    ld 0x00B7, g
+    ld 0x00BC, h
+    ld 0x00BD, g
 DATA_PARSE:
     ld a, 0x00
-    ld 0x00B8, a
+    ld 0x00BE, a
     call SPACE
     cmp a, 0x22
     bne DATA_UNQUOTED
     ld a, 0x01
-    ld 0x00B8, a
-    ld ef, 0x0F80
+    ld 0x00BE, a
+    ld ef, 0x0901
     inc gh
 DATA_QUOTED_BYTE:
     ld a, (gh)
@@ -2921,7 +3397,7 @@ DATA_UNQUOTED_END:
     jmp INVALID_DATA
 DATA_UNQUOTED_NONEMPTY:
     push ef
-    ld ef, 0x0F80
+    ld ef, 0x0901
 DATA_UNQUOTED_COPY:
     ld a, (gh)
     call STRING_APPEND
@@ -2950,13 +3426,13 @@ DATA_LINE_DONE:
 
 ; Strict signed decimal constants only: no variable lookup or expressions.
 DATA_INTEGER:
-    ld cd, 0x00B8
+    ld cd, 0x00BE
     ld a, (cd)
     cmp a, 0x00
     beq DATA_INTEGER_UNQUOTED
     jmp TYPE_MISMATCH
 DATA_INTEGER_UNQUOTED:
-    ld gh, 0x0F80
+    ld gh, 0x0901
     ld c, 0x00
     ld a, (gh)
     cmp a, 0x2D
