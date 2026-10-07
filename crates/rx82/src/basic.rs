@@ -256,6 +256,11 @@ impl Parser<'_> {
     fn string_atom(&mut self) -> Result<String> {
         let value = match self.next() {
             Some(Token::Text(text)) => text,
+            Some(Token::Word(name))
+                if matches!(name.as_str(), "MID$" | "LEFT$" | "RIGHT$" | "CHR$") =>
+            {
+                return self.string_function(&name);
+            }
             Some(Token::Word(name)) if name.ends_with('$') => {
                 if let Some(index) = self.subscript(&name)? {
                     self.string_arrays
@@ -276,6 +281,109 @@ impl Parser<'_> {
         };
         check_string(&value)?;
         self.pool.borrow_mut().push(value.len())?;
+        Ok(value)
+    }
+    fn string_function(&mut self, name: &str) -> Result<String> {
+        ensure!(self.symbol('('), "expected (");
+        let value = if name == "CHR$" {
+            let code = self.expression()?;
+            ensure!(
+                code == 9 || (32..=126).contains(&code),
+                "invalid string character"
+            );
+            char::from(u8::try_from(code)?).to_string()
+        } else {
+            let text = self.string_expression()?;
+            ensure!(self.symbol(','), "expected comma");
+            let argument = self.expression()?;
+            ensure!(
+                argument >= i16::from(name == "MID$"),
+                "invalid function argument"
+            );
+            let argument = usize::try_from(argument)?;
+            let (start, count) = match name {
+                "LEFT$" => (0, argument),
+                "RIGHT$" => (text.len().saturating_sub(argument), argument),
+                _ => {
+                    let count = if self.symbol(',') {
+                        let count = self.expression()?;
+                        ensure!(count >= 0, "invalid function argument");
+                        usize::try_from(count)?
+                    } else {
+                        text.len()
+                    };
+                    (argument.saturating_sub(1).min(text.len()), count)
+                }
+            };
+            let end = start.saturating_add(count).min(text.len());
+            let value = text
+                .get(start..end)
+                .context("invalid function argument")?
+                .to_owned();
+            self.pool.borrow_mut().pop();
+            value
+        };
+        ensure!(self.symbol(')'), "expected )");
+        self.pool.borrow_mut().push(value.len())?;
+        Ok(value)
+    }
+    fn string_number(&mut self, name: &str) -> Result<i16> {
+        ensure!(self.symbol('('), "expected (");
+        let start = if name == "INSTR" && !self.is_string() {
+            let start = self.expression()?;
+            ensure!(start > 0, "invalid function argument");
+            ensure!(self.symbol(','), "expected comma");
+            usize::try_from(start)?.saturating_sub(1)
+        } else {
+            0
+        };
+        let text = self.string_expression()?;
+        let value = match name {
+            "ASC" => i16::from(
+                *text
+                    .as_bytes()
+                    .first()
+                    .context("invalid function argument")?,
+            ),
+            "VAL" => {
+                let text = text.trim_start_matches([' ', '\t']);
+                let (negative, digits) = if let Some(digits) = text.strip_prefix('-') {
+                    (true, digits)
+                } else {
+                    (false, text.strip_prefix('+').unwrap_or(text))
+                };
+                let mut value = 0_i16;
+                for digit in digits.bytes().take_while(u8::is_ascii_digit) {
+                    let digit = i16::from(digit.strict_sub(b'0'));
+                    value = value
+                        .checked_mul(10)
+                        .and_then(|value| {
+                            if negative {
+                                value.checked_sub(digit)
+                            } else {
+                                value.checked_add(digit)
+                            }
+                        })
+                        .context("integer overflow")?;
+                }
+                value
+            }
+            _ => {
+                ensure!(self.symbol(','), "expected comma");
+                let needle = self.string_expression()?;
+                let found = if start >= text.len() {
+                    None
+                } else {
+                    text.get(start..).and_then(|tail| tail.find(&needle))
+                };
+                self.pool.borrow_mut().pop();
+                i16::try_from(
+                    found.map_or(0, |offset| start.saturating_add(offset).saturating_add(1)),
+                )?
+            }
+        };
+        ensure!(self.symbol(')'), "expected )");
+        self.pool.borrow_mut().pop();
         Ok(value)
     }
     fn string_expression(&mut self) -> Result<String> {
@@ -415,6 +523,9 @@ impl Parser<'_> {
         let mut left = match self.next().context("expected expression")? {
             Token::Number(n) => i16::try_from(n).context("integer out of range")?,
             Token::Word(name) if name == "LEN" => self.length()?,
+            Token::Word(name) if matches!(name.as_str(), "ASC" | "VAL" | "INSTR") => {
+                self.string_number(&name)?
+            }
             Token::Word(name) if name == "RND" => {
                 ensure!(self.symbol('('), "expected (");
                 let bound = self.expression()?;

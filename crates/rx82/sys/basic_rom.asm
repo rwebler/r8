@@ -624,6 +624,21 @@ VALUE_VAR:
     bne VALUE_NOT_LEN
     jmp LENGTH
 VALUE_NOT_LEN:
+    ld cd, KW_ASC
+    call MATCH
+    bne VALUE_NOT_ASC
+    jmp STRING_ASC
+VALUE_NOT_ASC:
+    ld cd, KW_VAL
+    call MATCH
+    bne VALUE_NOT_VAL
+    jmp STRING_VAL
+VALUE_NOT_VAL:
+    ld cd, KW_INSTR
+    call MATCH
+    bne VALUE_NOT_INSTR
+    jmp STRING_INSTR
+VALUE_NOT_INSTR:
     ld cd, KW_PEEK
     call MATCH
     bne VALUE_NOT_PEEK
@@ -2473,8 +2488,14 @@ IS_STRING_ATOM:
     bcc IS_STRING_NO
     cmp a, 0x5B
     bcs IS_STRING_NO
+IS_STRING_WORD:
     inc gh
     call PEEK
+    cmp a, 0x41
+    bcc IS_STRING_SUFFIX
+    cmp a, 0x5B
+    bcc IS_STRING_WORD
+IS_STRING_SUFFIX:
     cmp a, 0x24
     beq IS_STRING_YES
 IS_STRING_NO:
@@ -2697,13 +2718,40 @@ STRING_SEQUENCE_DONE:
 STRING_ATOM:
     call SPACE
     cmp a, 0x22
-    beq STRING_LITERAL
+    bne STRING_ATOM_NOT_LITERAL
+    jmp STRING_LITERAL
+STRING_ATOM_NOT_LITERAL:
     cmp a, 0x28
-    beq STRING_PAREN
+    bne STRING_ATOM_NOT_PAREN
+    jmp STRING_PAREN
+STRING_ATOM_NOT_PAREN:
     call IS_STRING
     bne STRING_NAMED
     jmp TYPE_MISMATCH
 STRING_NAMED:
+    ld cd, KW_MID
+    call MATCH
+    bne STRING_NOT_MID
+    ld ef, 0x0002
+    jmp STRING_SLICE
+STRING_NOT_MID:
+    ld cd, KW_LEFT
+    call MATCH
+    bne STRING_NOT_LEFT
+    ld ef, 0x0000
+    jmp STRING_SLICE
+STRING_NOT_LEFT:
+    ld cd, KW_RIGHT
+    call MATCH
+    bne STRING_NOT_RIGHT
+    ld ef, 0x0001
+    jmp STRING_SLICE
+STRING_NOT_RIGHT:
+    ld cd, KW_CHR
+    call MATCH
+    bne STRING_NOT_CHR
+    jmp STRING_CHR
+STRING_NOT_CHR:
     call STRING_VARIABLE
     ld b, (cd)
     ld a, (cd+0x01)
@@ -3130,10 +3178,13 @@ LENGTH_OPEN:
     bcc LENGTH_STRING_EXPRESSION
     cmp a, 0x5B
     bcs LENGTH_STRING_EXPRESSION
-    call VARIABLE
+    inc gh
     call PEEK
     cmp a, 0x24
     bne LENGTH_STRING_EXPRESSION
+    dec gh
+    call VARIABLE
+    call PEEK
     inc gh
     push cd
     call SPACE
@@ -3677,3 +3728,270 @@ RANDOM_BOUND_TEXT:
     data "? INVALID RANDOM BOUND", 0x00
 RANDOM_SEED_ERROR_TEXT:
     data "? RANDOM SEED FAILED", 0x00
+
+; String built-ins keep arguments on the temporary stack across recursive calls.
+KW_MID:
+    data "MID$", 0x00
+KW_LEFT:
+    data "LEFT$", 0x00
+KW_RIGHT:
+    data "RIGHT$", 0x00
+KW_CHR:
+    data "CHR$", 0x00
+KW_ASC:
+    data "ASC", 0x00
+KW_VAL:
+    data "VAL", 0x00
+KW_INSTR:
+    data "INSTR", 0x00
+FUNCTION_OPEN:
+    call SPACE
+    cmp a, 0x28
+    beq FUNCTION_OPEN_OK
+    jmp EXPECTED_LPAREN
+FUNCTION_OPEN_OK:
+    inc gh
+    ret
+FUNCTION_COMMA:
+    call SPACE
+    cmp a, 0x2C
+    beq FUNCTION_COMMA_OK
+    jmp EXPECTED_COMMA
+FUNCTION_COMMA_OK:
+    inc gh
+    ret
+FUNCTION_NONNEGATIVE:
+    cmp ab, 0x8000
+    bcc FUNCTION_ARGUMENT_OK
+    jmp BAD_FUNCTION_ARGUMENT
+FUNCTION_POSITIVE:
+    cmp ab, 0x0000
+    bne FUNCTION_NONNEGATIVE
+    jmp BAD_FUNCTION_ARGUMENT
+FUNCTION_ARGUMENT_OK:
+    ret
+BAD_FUNCTION_ARGUMENT:
+    ld cd, BAD_FUNCTION_ARGUMENT_TEXT
+    jmp REPORT_ERROR
+BAD_FUNCTION_ARGUMENT_TEXT:
+    data "? INVALID FUNCTION ARGUMENT", 0x00
+
+; EF selects LEFT (0), RIGHT (1), MID (2).
+STRING_SLICE:
+    call FUNCTION_OPEN
+    call STRING_EXPRESSION
+    call FUNCTION_COMMA
+    call EXPR
+    call FUNCTION_NONNEGATIVE
+    cmp ef, 0x0002
+    beq STRING_MID_ARGUMENTS
+    ; Count in EF, zero-based start in AB.
+    ld cd, ef
+    ld ef, ab
+    ld ab, 0x0000
+    cmp cd, 0x0000
+    beq STRING_SLICE_ARGUMENTS_DONE
+    call STACK_TOP
+    ld b, (cd)
+    ld a, 0x00
+    cmp ab, ef
+    bcs STRING_RIGHT_START
+    ld ab, 0x0000
+    jmp STRING_SLICE_ARGUMENTS_DONE
+STRING_RIGHT_START:
+    sec
+    sub ab, ef
+    jmp STRING_SLICE_ARGUMENTS_DONE
+STRING_MID_ARGUMENTS:
+    call FUNCTION_POSITIVE
+    dec ab
+    push ab
+    call SPACE
+    cmp a, 0x2C
+    beq STRING_MID_COUNT
+    ld ab, 0x00FF
+    jmp STRING_MID_COUNT_DONE
+STRING_MID_COUNT:
+    inc gh
+    call EXPR
+    call FUNCTION_NONNEGATIVE
+STRING_MID_COUNT_DONE:
+    ld ef, ab
+    pop ab
+STRING_SLICE_ARGUMENTS_DONE:
+    call LENGTH_CLOSE
+    push ab
+    call STACK_TOP
+    ld b, (cd)
+    ld a, 0x00
+    pop cd
+    ; Clamp start to length, then count to remaining length.
+    cmp cd, ab
+    bcc STRING_SLICE_START_OK
+    ld cd, ab
+STRING_SLICE_START_OK:
+    sec
+    sub ab, cd
+    cmp ef, ab
+    bcc STRING_SLICE_COUNT_OK
+    ld ef, ab
+STRING_SLICE_COUNT_OK:
+    push cd
+    push ef
+    call STACK_TOP
+    inc cd
+    pop ef
+    pop ab
+    clc
+    add cd, ab
+    ld b, f
+    ld 0x0900, b
+    ld ef, 0x0901
+    call COPY_STRING_BYTES
+    call STACK_POP
+    ld cd, 0x0900
+    jmp STACK_PUSH
+STRING_CHR:
+    call FUNCTION_OPEN
+    call EXPR
+    call LENGTH_CLOSE
+    cmp ab, 0x0009
+    beq STRING_CHR_VALID
+    cmp ab, 0x0020
+    bcc STRING_CHR_INVALID
+    cmp ab, 0x007F
+    bcs STRING_CHR_INVALID
+STRING_CHR_VALID:
+    ld 0x0901, b
+    ld a, 0x01
+    ld 0x0900, a
+    ld cd, 0x0900
+    jmp STACK_PUSH
+STRING_CHR_INVALID:
+    jmp INVALID_STRING_CHARACTER
+STRING_ASC:
+    call FUNCTION_OPEN
+    call STRING_EXPRESSION
+    call STACK_TOP
+    ld a, (cd)
+    cmp a, 0x00
+    bne STRING_ASC_NONEMPTY
+    jmp BAD_FUNCTION_ARGUMENT
+STRING_ASC_NONEMPTY:
+    ld b, (cd+0x01)
+    ld a, 0x00
+    call STACK_POP
+    jmp LENGTH_CLOSE
+STRING_VAL:
+    call FUNCTION_OPEN
+    call STRING_EXPRESSION
+    call LENGTH_CLOSE
+    ; Scratch has a terminating NUL so NUMBER cannot read past the string.
+    call STACK_TOP
+    ld b, (cd)
+    inc cd
+    ld ef, 0x0901
+    call COPY_STRING_BYTES
+    ld (ef), 0x00
+    call STACK_POP
+    push gh
+    ld gh, 0x0901
+    call SPACE
+    ld c, 0x00
+    cmp a, 0x2D
+    bne STRING_VAL_PLUS
+    ld c, 0x01
+    inc gh
+    jmp STRING_VAL_NUMBER
+STRING_VAL_PLUS:
+    cmp a, 0x2B
+    bne STRING_VAL_NUMBER
+    inc gh
+STRING_VAL_NUMBER:
+    call NUMBER
+    pop gh
+    cmp c, 0x00
+    bne STRING_VAL_NEGATIVE
+    cmp ab, 0x8000
+    bcc STRING_VAL_DONE
+    jmp OVERFLOW
+STRING_VAL_NEGATIVE:
+    cmp ab, 0x8000
+    bcc STRING_VAL_NEGATE
+    beq STRING_VAL_NEGATE
+    jmp OVERFLOW
+STRING_VAL_NEGATE:
+    jmp NEGATE
+STRING_VAL_DONE:
+    ret
+STRING_INSTR:
+    call FUNCTION_OPEN
+    call IS_STRING
+    bne STRING_INSTR_DEFAULT
+    call EXPR
+    call FUNCTION_POSITIVE
+    push ab
+    call FUNCTION_COMMA
+    jmp STRING_INSTR_ARGUMENTS
+STRING_INSTR_DEFAULT:
+    ld ab, 0x0001
+    push ab
+STRING_INSTR_ARGUMENTS:
+    call STRING_EXPRESSION
+    call FUNCTION_COMMA
+    call STRING_EXPRESSION
+    call LENGTH_CLOSE
+    call STACK_TOP
+    ld b, (cd)
+    inc cd
+    ld ef, 0x0B01
+    call COPY_STRING_BYTES
+    ld (ef), 0x00
+    call STACK_POP
+    call STACK_TOP
+    ld b, (cd)
+    ld 0x0900, b
+    inc cd
+    ld ef, 0x0901
+    call COPY_STRING_BYTES
+    ld (ef), 0x00
+    call STACK_POP
+    pop ef
+    push gh
+    ld gh, ef
+    ld cd, 0x0900
+    ld b, (cd)
+    ld a, 0x00
+    cmp ab, gh
+    bcc STRING_INSTR_MISSING
+    clc
+    add cd, gh
+STRING_INSTR_CANDIDATE:
+    push cd
+    ld ef, 0x0B01
+STRING_INSTR_COMPARE:
+    ld b, (ef)
+    cmp b, 0x00
+    beq STRING_INSTR_FOUND
+    ld a, (cd)
+    cmp a, b
+    bne STRING_INSTR_NEXT
+    inc cd
+    inc ef
+    jmp STRING_INSTR_COMPARE
+STRING_INSTR_NEXT:
+    pop cd
+    inc cd
+    inc gh
+    ld a, (cd)
+    cmp a, 0x00
+    bne STRING_INSTR_CANDIDATE
+STRING_INSTR_MISSING:
+    ld ab, 0x0000
+    pop gh
+    ret
+STRING_INSTR_FOUND:
+    pop cd
+    ld ab, gh
+    pop gh
+    ret

@@ -124,7 +124,7 @@ are each limited to 256. Line numbers retain their unsigned range of 1–65535;
 literal jump targets may use that full range even though numeric expressions
 use signed 16-bit values.
 
-### Strings and LEN
+### Strings and string functions
 
 ```basic
 10 INPUT N$
@@ -169,6 +169,35 @@ Failed stores retain the old value. Freed records are reused, and compaction
 runs between statements when no temporaries remain. `PRINT` and `LEN` release
 results without storing them. Program records remain 128 bytes, so long values
 must be built with `+` or supplied to string INPUT (up to 255 characters).
+
+String functions use one-based character positions and accept expressions in all
+arguments. Function names are case insensitive.
+
+| Function | Result |
+| --- | --- |
+| `LEFT$(text, count)` | First `count` characters. |
+| `RIGHT$(text, count)` | Last `count` characters. |
+| `MID$(text, start [, count])` | Characters from `start`; omitted `count` takes the remainder. |
+| `ASC(text)` | ASCII code of the first character; an empty string is an error. |
+| `CHR$(code)` | One character: tab (9) or printable ASCII (32–126). |
+| `VAL(text)` | Signed decimal integer prefix, after leading spaces or tabs. No digits means zero. |
+| `INSTR([start,] text, needle)` | First case-sensitive match at or after `start` (default 1), or zero. |
+
+Substring counts must be nonnegative; zero produces an empty string and counts
+larger than the available text are clamped. `MID$` and `INSTR` require a positive
+start. A start beyond the text returns an empty string or zero respectively.
+An empty `INSTR` needle matches at the start position when that position is
+within the text; an empty haystack returns zero.
+
+`VAL` accepts an optional leading `+` or `-` and stops at the first nondigit:
+`VAL(" -42 apples")` is -42 and `VAL("12.5")` is 12. Results outside
+-32768–32767 report `INTEGER OVERFLOW`. Unsupported `CHR$` codes report
+`INVALID STRING CHARACTER`; negative counts, nonpositive starts, and `ASC("")`
+report `INVALID FUNCTION ARGUMENT`.
+
+For example, `MID$("abcdef",2,3)` is `"bcd"`, `CHR$(65)` is `"A"`, and
+`INSTR(3,"banana","ana")` is 4. These functions work in both interpreters,
+including nested calls such as `ASC(RIGHT$(A$,1))`.
 
 ### DATA / READ / RESTORE
 
@@ -373,7 +402,8 @@ empty `I` sends a blank line. `Q` (or host EOF) exits the monitor; `I QUIT` then
 line numbers; see the monitor commands below.
 
 The native dialect supports `PRINT`, assignment (`LET` optional), integer and
-string `INPUT`, string concatenation, `LEN`, `DATA`/`READ`/`RESTORE`, `PEEK`/`POKE`,
+string `INPUT`, string concatenation, `LEN`, `MID$`/`LEFT$`/`RIGHT$`,
+`ASC`/`CHR$`/`VAL`/`INSTR`, `DATA`/`READ`/`RESTORE`, `PEEK`/`POKE`,
 `RND`/`RANDOMIZE` with the optional random device, one-dimensional integer and string arrays
 declared with `DIM`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
 six comparisons with `IF ... THEN`, `GOTO`, `GOSUB`/`RETURN`, `FOR`/`NEXT` with
