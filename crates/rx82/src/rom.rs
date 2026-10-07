@@ -14,7 +14,7 @@ pub struct Rom {
 impl Device for Rom {
     /// Responds to a memory request if the [`Bus::mem`] line is active.
     fn tick(&mut self, bus: &mut Bus) {
-        if bus.mem && self.in_range(bus.addr) {
+        if bus.mem && !bus.write && self.in_range(bus.addr) {
             let data = self.get(bus.addr);
             bus.write_data(data);
         }
