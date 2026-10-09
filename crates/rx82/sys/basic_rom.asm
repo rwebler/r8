@@ -4,12 +4,13 @@
 ; 0092 subroutine stack pointer, 0094 loop stack pointer.
 ; 00A6..AC file transfer state (LOAD validates before replacing the program).
 ; RAM: 0080 current line, 0082 running, 0084 next line pointer.
-; 0200 input buffer (128 bytes), 0300 variables (26 little-endian words).
+; 0200 INPUT buffer (256 bytes), 0300 variables (26 little-endian words).
 ; 0800 integer arrays, 0870 string arrays; 0340 scalar string offsets.
-; 0900..0FFF scratch; EF00..FEFF string pool and temporary stack.
+; 0900..0DFF token scratch, 0E00..0FFF string scratch; EF00..FEFF pool.
+; Long lexical items spill from 0200..02FF to A000..A3FF during entry.
 ; 9000..9FFF integer array elements; 00B0 array allocation pointer.
-; 1000..8FFF: 256 records of 128 bytes: line word, NUL-terminated text.
-; A zero line number marks a free record. Stack grows down from BFFF.
+; 1000..8FFF: packed next word, line word, token stream, zero byte.
+; 0086 holds the final zero pair; stack grows down from BFFF.
     org 0xC100
 BOOT:
     ld sp, 0xBFFF
@@ -26,32 +27,16 @@ PROMPT:
     ld 0x0082, a
     ld cd, PROMPT_TEXT
     call PUTS
-    call READLINE
-    ld gh, 0x0200
-    call SPACE
-    cmp a, 0x00
-    bne LONG_25
-    jmp PROMPT
-LONG_25:
-    cmp a, 0x30
-    bcs LONG_27
-    jmp DIRECT
-LONG_27:
-    cmp a, 0x3A
-    bcc LONG_29
-    jmp DIRECT
-LONG_29:
-    call NUMBER
+    call READ_TOKEN_LINE
+    ld cd, 0x00E6
+    ld b, (cd)
+    ld a, (cd+0x01)
     cmp ab, 0x0000
-    bne LONG_32
-    jmp INVALID_LINE_NUMBER
-LONG_32:
-    push ab
-    call SPACE
-    pop ab
-    call EDIT
+    beq DIRECT
+    call EDIT_PREPARED
     jmp PROMPT
 DIRECT:
+    ld gh, 0x0900
     call STATEMENT
     jmp PROMPT
 ; Command dispatch. MATCH advances GH only on success.
@@ -214,17 +199,11 @@ NEW:
     ret
 NEW_PROGRAM:
     ld cd, 0x1000
+    ld 0x0086, d
+    ld 0x0087, c
+    ld (cd), 0x00
     ld a, 0x00
-CLEAR_RECORD:
-    ld (cd), a
-    inc cd
-    ld (cd), a
-    clc
-    add cd, 0x007F
-    cmp cd, 0x9000
-    beq LONG_132
-    jmp CLEAR_RECORD
-LONG_132:
+    ld (cd+0x01), a
     ret
 CLEAR_VARS:
     ld cd, 0x0300
@@ -237,116 +216,185 @@ CLEAR_VAR:
     jmp CLEAR_VAR
 LONG_141:
     jmp CLEAR_ARRAYS
-; AB line number, GH body. Find matching slot or first empty slot.
-EDIT:
-    push ab
-    ld cd, 0x1000
-    ld ef, 0x0000
-EDIT_SCAN:
-    ld h, (cd)
-    ld g, (cd+0x01)
-    cmp gh, ab
-    bne LONG_152
-    jmp EDIT_FOUND
-LONG_152:
-    cmp gh, 0x0000
-    beq LONG_154
-    jmp EDIT_NEXT
-LONG_154:
-    cmp ef, 0x0000
-    beq LONG_156
-    jmp EDIT_NEXT
-LONG_156:
-    ld ef, cd
-EDIT_NEXT:
-    clc
-    add cd, 0x0080
-    cmp cd, 0x9000
-    beq LONG_162
-    jmp EDIT_SCAN
-LONG_162:
-    cmp ef, 0x0000
-    bne LONG_164
-    jmp PROGRAM_FULL
-LONG_164:
+ ; Packed editor. E0 insertion, E2 old tail, E4 new size, E6 line.
+EDIT_PREPARED:
+    ld cd, 0x00E8
+    ld b, (cd)
+    ld a, (cd+0x01)
     ld cd, ef
-EDIT_FOUND:
-    pop ab
-    ; Reparse the line buffer to locate its body (scan used GH).
+    sec
+    sub cd, ab
+    ld ab, cd
+    cmp ab, 0x0001
+    bne EDIT_SIZE
+    ld ab, 0xFFFC
+EDIT_SIZE:
+    clc
+    add ab, 0x0004
+    ld 0x00E4, b
+    ld 0x00E5, a
+    ld cd, 0x1000
+EDIT_SCAN:
+    ld f, (cd)
+    ld e, (cd+0x01)
+    cmp ef, 0x0000
+    beq EDIT_INSERT
+    ld h, (cd+0x02)
+    ld g, (cd+0x03)
     push cd
-    ld gh, 0x0200
-    call NUMBER
-    push ab
-    call SPACE
-    ld e, a
-    pop ab
+    ld cd, 0x00E6
+    ld b, (cd)
+    ld a, (cd+0x01)
     pop cd
-    cmp e, 0x00
-    beq LONG_178
-    jmp EDIT_STORE
-LONG_178:
-    ld ab, 0x0000
-EDIT_STORE:
-    ld (cd), b
-    inc cd
-    ld (cd), a
-    inc cd
-EDIT_COPY:
-    ld a, (gh)
-    ld (cd), a
-    inc gh
-    inc cd
-    cmp a, 0x00
-    beq LONG_191
-    jmp EDIT_COPY
-LONG_191:
-    jmp RESET_DATA
-; Find smallest stored line greater than AB. Returns EF line, CD record.
-FIND_NEXT:
-    push gh
-    ld gh, 0x1000
-    ld cd, 0x0000
-    ld ef, 0xFFFF
-FIND_SCAN:
-    push ab
+    cmp gh, ab
+    bcs EDIT_POSITION
+    ld cd, ef
+    jmp EDIT_SCAN
+EDIT_POSITION:
+    beq EDIT_REPLACE
+EDIT_INSERT:
+    ld ef, cd
+EDIT_REPLACE:
+    ld 0x00E0, d
+    ld 0x00E1, c
+    ld 0x00E2, f
+    ld 0x00E3, e
+    ld gh, 0x00E4
     ld b, (gh)
     ld a, (gh+0x01)
-    ld 0x0088, b
-    ld 0x0089, a
-    pop ab
-    push cd
-    ld cd, 0x0088
-    ld d, (cd)
-    ld c, (gh+0x01)
-    cmp cd, ab
-    bcs LONG_211
-    jmp FIND_NO
-LONG_211:
-    bne LONG_212
-    jmp FIND_NO
-LONG_212:
-    cmp cd, ef
-    bne LONG_214
-    jmp FIND_CANDIDATE
-LONG_214:
-    bcc LONG_215
-    jmp FIND_NO
-LONG_215:
-FIND_CANDIDATE:
-    ld ef, cd
-    pop cd
-    ld cd, gh
-    jmp FIND_ADVANCE
-FIND_NO:
-    pop cd
-FIND_ADVANCE:
     clc
-    add gh, 0x0080
-    cmp gh, 0x9000
-    beq LONG_227
-    jmp FIND_SCAN
-LONG_227:
+    add ab, cd
+    sec
+    sub ab, ef
+    ld gh, 0x0086
+    ld d, (gh)
+    ld c, (gh+0x01)
+    ld gh, cd
+    clc
+    add gh, ab
+    cmp gh, 0x8FFF
+    bcc EDIT_FITS
+    jmp PROGRAM_FULL
+EDIT_FITS:
+    ld 0x0086, h
+    ld 0x0087, g
+    push ab
+    ld ab, 0x00EC
+    ld a, (ab)
+    cmp a, 0x00
+    beq EDIT_SHORT
+    pop ab
+    jmp EDIT_STAGED
+EDIT_SHORT:
+    pop ab
+    cmp gh, cd
+    bcc EDIT_DOWN
+    beq EDIT_WRITE
+    inc cd
+    inc gh
+EDIT_UP_LOOP:
+    ld a, (cd)
+    ld (gh), a
+    cmp cd, ef
+    beq EDIT_WRITE
+    dec cd
+    dec gh
+    jmp EDIT_UP_LOOP
+EDIT_DOWN:
+    inc cd
+    ld gh, ef
+    clc
+    add gh, ab
+EDIT_DOWN_LOOP:
+    ld a, (ef)
+    ld (gh), a
+    cmp ef, cd
+    beq EDIT_WRITE
+    inc ef
+    inc gh
+    jmp EDIT_DOWN_LOOP
+EDIT_WRITE:
+    ld cd, 0x00E0
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, 0x00E4
+    ld b, (cd)
+    ld a, (cd+0x01)
+    cmp ab, 0x0000
+    beq EDIT_LINKS
+    push ab
+    inc ef
+    inc ef
+    ld cd, 0x00E6
+    ld a, (cd)
+    ld (ef), a
+    inc ef
+    ld a, (cd+0x01)
+    ld (ef), a
+    inc ef
+    ld cd, 0x0900
+    pop ab
+    sec
+    sub ab, 0x0004
+    ld gh, ab
+EDIT_COPY:
+    ld a, (cd)
+    ld (ef), a
+    inc cd
+    inc ef
+    dec gh
+    bne EDIT_COPY
+EDIT_LINKS:
+    ld cd, 0x1000
+    ld ef, 0x0086
+    ld b, (ef)
+    ld a, (ef+0x01)
+EDIT_LINK_LOOP:
+    cmp cd, ab
+    beq EDIT_DONE
+    ld gh, cd
+    clc
+    add gh, 0x0004
+    push ab
+    call TOKEN_LINE_END
+    pop ab
+    ld (cd), h
+    ld (cd+0x01), g
+    ld cd, gh
+    jmp EDIT_LINK_LOOP
+EDIT_DONE:
+    jmp RESET_DATA
+FIND_NEXT:
+    push gh
+    ld cd, 0x1000
+FIND_SCAN:
+    ld h, (cd)
+    ld g, (cd+0x01)
+    cmp gh, 0x0000
+    beq FIND_NONE
+    ld f, (cd+0x02)
+    ld e, (cd+0x03)
+    cmp ef, ab
+    bcc FIND_ADVANCE
+    beq FIND_ADVANCE
     pop gh
+    ret
+FIND_ADVANCE:
+    ld cd, gh
+    jmp FIND_SCAN
+FIND_NONE:
+    ld cd, 0x0000
+    pop gh
+    ret
+SEEK_AFTER:
+    push ab
+    ld cd, 0x0080
+    ld b, (cd)
+    ld a, (cd+0x01)
+    call FIND_NEXT
+    ld 0x0084, d
+    ld 0x0085, c
+    pop ab
     ret
 LIST:
     call EOL
@@ -363,10 +411,10 @@ LONG_236:
     call PRINT_LINE
     ld a, 0x20
     call PUTCHAR
-    pop cd
-    inc cd
-    inc cd
-    call PUTS
+    pop gh
+    clc
+    add gh, 0x0004
+    call DETOKENIZE
     call NEWLINE
     pop ab
     jmp LIST_NEXT
@@ -384,20 +432,33 @@ RUN:
     ld 0x0081, a
     ld a, 0x01
     ld 0x0082, a
+    ld cd, 0x1000
+    ld 0x0084, d
+    ld 0x0085, c
 RUN_NEXT:
-    ld cd, 0x0080
-    ld b, (cd)
-    ld a, (cd+0x01)
-    call FIND_NEXT
-    cmp cd, 0x0000
-    bne LONG_270
+    ld cd, 0x0084
+    ld f, (cd)
+    ld e, (cd+0x01)
+    cmp ef, 0x0000
+    bne RUN_HEADER
     jmp RUN_DONE
-LONG_270:
+RUN_HEADER:
+    ld cd, ef
+    ld f, (cd)
+    ld e, (cd+0x01)
+    cmp ef, 0x0000
+    bne RUN_LINE
+    jmp RUN_DONE
+RUN_LINE:
+    ld 0x0084, f
+    ld 0x0085, e
+    ld f, (cd+0x02)
+    ld e, (cd+0x03)
     ld 0x0080, f
     ld 0x0081, e
     ld gh, cd
-    inc gh
-    inc gh
+    clc
+    add gh, 0x0004
     call STATEMENT
     ld cd, 0x0082
     ld a, (cd)
@@ -447,7 +508,7 @@ GOTO_STORE:
     dec ab
     ld 0x0080, b
     ld 0x0081, a
-    ret
+    jmp SEEK_AFTER
 ASSIGN:
     call IS_STRING
     beq ASSIGN_INTEGER
@@ -604,6 +665,12 @@ LONG_442:
     bne LONG_444
     jmp VALUE_PLUS
 LONG_444:
+    cmp a, 0xB0
+    bne VALUE_NOT_TOKEN
+    jmp NUMBER
+VALUE_NOT_TOKEN:
+    cmp a, 0xB2
+    beq LONG_448
     cmp a, 0x30
     bcs LONG_446
     jmp VALUE_VAR
@@ -675,6 +742,8 @@ LONG_467:
 VALUE_NEG:
     inc gh
     call SPACE
+    cmp a, 0xB0
+    beq VALUE_NEG_RECURSE
     cmp a, 0x30
     bcs LONG_475
     jmp VALUE_NEG_RECURSE
@@ -892,6 +961,19 @@ LONG_613:
     ret
 ; Parse unsigned decimal to AB (0..65535); VALUE enforces signed limits.
 NUMBER:
+    ld a, (gh)
+    cmp a, 0xB0
+    beq NUMBER_TOKEN
+    cmp a, 0xB2
+    bne NUMBER_TEXT
+NUMBER_TOKEN:
+    inc gh
+    ld b, (gh)
+    inc gh
+    ld a, (gh)
+    inc gh
+    ret
+NUMBER_TEXT:
     push cd
     push ef
     ld ef, 0x0000
@@ -1040,6 +1122,28 @@ EOL:
 LONG_737:
     ret
 MATCH:
+    ld a, (gh)
+    cmp a, 0x80
+    bcc MATCH_SOURCE
+    ld a, (cd)
+    push ef
+    ld e, (gh)
+    cmp a, e
+    bne MATCH_TOKEN_DIFFERENT
+    pop ef
+    inc gh
+    ld a, 0x00
+    cmp a, 0x00
+    ret
+MATCH_TOKEN_DIFFERENT:
+    pop ef
+MATCH_TOKEN_FAIL:
+    ld a, 0x01
+    cmp a, 0x00
+    ret
+MATCH_SOURCE:
+    inc cd
+MATCH_TEXT:
     push gh
     push ef
 MATCH_NEXT:
@@ -1057,15 +1161,9 @@ LONG_748:
     inc cd
     jmp MATCH_NEXT
 MATCH_BOUNDARY:
-    call PEEK
-    cmp a, 0x41
-    bcs LONG_755
+    call WORD_CHAR
+    bne MATCH_FAIL
     jmp MATCH_OK
-LONG_755:
-    cmp a, 0x5B
-    bcs LONG_757
-    jmp MATCH_FAIL
-LONG_757:
 MATCH_OK:
     pop ef
     pop cd
@@ -1086,6 +1184,8 @@ READLINE_STRING:
     ld a, 0x01
     ld 0x00D0, a
 READLINE_START:
+    ld a, 0x01
+    ld 0x00EE, a
     ld gh, 0x0200
 READLINE_NEXT:
     call GETCHAR
@@ -1121,7 +1221,7 @@ READLINE_STORE:
     ld cd, STRING_TOO_LONG_TEXT
     jmp DISCARD_INPUT_LINE
 READLINE_SHORT_LIMIT:
-    cmp gh, 0x027A
+    cmp gh, 0x02FF
     bcc LONG_786
     jmp INPUT_TOO_LONG
 LONG_786:
@@ -1136,6 +1236,8 @@ READLINE_FILE_END:
     jmp BAD_INPUT_CHARACTER
 LONG_794:
 READLINE_END:
+    ld a, 0x00
+    ld 0x00EE, a
     ld (gh), 0x00
     ret
 GETCHAR:
@@ -1201,6 +1303,21 @@ LONG_844:
 SYNTAX_ERROR:
     ld cd, SYNTAX_ERROR_TEXT
 REPORT_ERROR:
+    push cd
+    ld cd, 0x00EE
+    ld a, (cd)
+    cmp a, 0x00
+    beq REPORT_DRAINED
+REPORT_DRAIN:
+    call GETCHAR
+    cmp a, 0x0A
+    beq REPORT_DRAINED
+    cmp a, 0xFF
+    bne REPORT_DRAIN
+REPORT_DRAINED:
+    ld a, 0x00
+    ld 0x00EE, a
+    pop cd
     ld sp, 0xBFFF
     ld a, 0x00
     ld 0x00A6, a
@@ -1231,26 +1348,6 @@ PROMPT_TEXT:
     data "> ", 0x00
 SYNTAX_ERROR_TEXT:
     data "? UNEXPECTED INPUT", 0x00
-KW_REM:
-    data "REM", 0x00
-KW_PRINT:
-    data "PRINT", 0x00
-KW_LET:
-    data "LET", 0x00
-KW_GOTO:
-    data "GOTO", 0x00
-KW_RUN:
-    data "RUN", 0x00
-KW_LIST:
-    data "LIST", 0x00
-KW_NEW:
-    data "NEW", 0x00
-KW_END:
-    data "END", 0x00
-KW_STOP:
-    data "STOP", 0x00
-KW_QUIT:
-    data "QUIT", 0x00
 
 REQUIRE_RUN:
     push ab
@@ -1313,6 +1410,15 @@ IF_INTEGER_LEFT:
 IF_LEFT_READY:
     push ab
     call SPACE
+    ld b, 0x05
+    cmp a, 0xB3
+    beq IF_OPERATOR_DONE
+    ld b, 0x03
+    cmp a, 0xB4
+    beq IF_OPERATOR_DONE
+    ld b, 0x06
+    cmp a, 0xB5
+    beq IF_OPERATOR_DONE
     ld b, 0x02
     cmp a, 0x3D
     bne LONG_939
@@ -1413,6 +1519,8 @@ LONG_993:
 LONG_995:
 IF_TRUE:
     call SPACE
+    cmp a, 0xB2
+    beq LONG_1001
     cmp a, 0x30
     bcs LONG_999
     jmp IF_STATEMENT
@@ -1490,7 +1598,7 @@ LONG_1048:
     ld 0x0080, a
     ld 0x0092, f
     ld 0x0093, e
-    ret
+    jmp SEEK_AFTER
 INPUT:
     call IS_STRING
     beq INPUT_INTEGER
@@ -1517,6 +1625,9 @@ INPUT_INTEGER:
 TARGET:
     call SPACE
     push gh
+    cmp a, 0xB2
+    beq LONG_1089
+TARGET_SOURCE:
     cmp a, 0x30
     bcs LONG_1087
     jmp TARGET_EXPR
@@ -1539,16 +1650,6 @@ LONG_1096:
 TARGET_EXPR:
     pop gh
     jmp EXPR
-KW_IF:
-    data "IF", 0x00
-KW_THEN:
-    data "THEN", 0x00
-KW_GOSUB:
-    data "GOSUB", 0x00
-KW_RETURN:
-    data "RETURN", 0x00
-KW_INPUT:
-    data "INPUT", 0x00
 
 ; Loop frames at 0500..07FF, 16 bytes each:
 ; +0 FOR line, +2 NEXT line, +4 variable address, +6 limit, +8 step.
@@ -1640,8 +1741,8 @@ LONG_1181:
     ld 0x00A0, f
     ld 0x00A1, e
     ld gh, cd
-    inc gh
-    inc gh
+    clc
+    add gh, 0x0004
     call SPACE
     ld cd, KW_FOR
     call MATCH
@@ -1752,7 +1853,7 @@ FOR_SKIP:
     ld a, (cd+0x01)
     ld 0x0080, b
     ld 0x0081, a
-    ret
+    jmp SEEK_AFTER
 ; CD = current call's loop base (0500 outside GOSUB).
 LOOP_BASE:
     ld cd, 0x0092
@@ -1856,19 +1957,11 @@ NEXT_REPEAT:
     ld a, (ef+0x01)
     ld 0x0080, b
     ld 0x0081, a
-    ret
+    jmp SEEK_AFTER
 NEXT_POP:
     ld 0x0094, f
     ld 0x0095, e
     ret
-KW_FOR:
-    data "FOR", 0x00
-KW_TO:
-    data "TO", 0x00
-KW_STEP:
-    data "STEP", 0x00
-KW_NEXT:
-    data "NEXT", 0x00
 
 ; AB is a jump target. Discard loops exited in the current subroutine only.
 PRUNE_LOOPS:
@@ -1931,6 +2024,23 @@ LONG_1425:
 FILENAME:
     call REQUIRE_DIRECT
     call SPACE
+    cmp a, 0xB1
+    bne FILENAME_TEXT
+    inc gh
+    ld b, (gh)
+    inc gh
+    ld a, 0x00
+    ld 0xFF14, a
+FILENAME_TOKEN_BYTE:
+    cmp b, 0x00
+    beq FILENAME_END
+    ld a, (gh)
+    ld 0xFF12, a
+    call FILE_CHECK
+    inc gh
+    dec b
+    jmp FILENAME_TOKEN_BYTE
+FILENAME_TEXT:
     cmp a, 0x22
     beq LONG_1431
     jmp EXPECTED_FILENAME
@@ -2001,48 +2111,48 @@ LOAD_LINE:
     beq LONG_1489
     jmp LOAD_EOF
 LONG_1489:
-    call READLINE
-    ld gh, 0x0200
-    call SPACE
-    cmp a, 0x00
-    bne LONG_1494
-    jmp LOAD_LINE
-LONG_1494:
-    cmp a, 0x30
-    bcs LONG_1496
-    jmp INVALID_LINE_NUMBER
-LONG_1496:
-    cmp a, 0x3A
-    bcc LONG_1498
-    jmp INVALID_LINE_NUMBER
-LONG_1498:
-    call NUMBER
+    call READ_TOKEN_LINE
+    ld cd, 0x00E6
+    ld b, (cd)
+    ld a, (cd+0x01)
     cmp ab, 0x0000
-    bne LONG_1501
+    bne LOAD_NUMBERED
+    cmp ef, 0x0901
+    beq LOAD_LINE
     jmp INVALID_LINE_NUMBER
-LONG_1501:
-    push ab
-    call SPACE
-    pop ab
+LOAD_NUMBERED:
     ld cd, 0x00AC
     ld c, (cd)
     cmp c, 0x00
     beq LONG_1508
     jmp LOAD_INSTALL
 LONG_1508:
+    cmp ef, 0x0901
+    bne LOAD_HAS_BODY
+    jmp LOAD_LINE
+LOAD_HAS_BODY:
+    ld ab, ef
+    sec
+    sub ab, 0x0900
+    clc
+    add ab, 0x0004
     ld cd, 0x00AA
-    ld b, (cd)
-    ld a, (cd+0x01)
-    inc ab
-    cmp ab, 0x0101
-    bcc LONG_1514
+    ld f, (cd)
+    ld e, (cd+0x01)
+    clc
+    add ab, ef
+    bcc LOAD_SIZE_NO_WRAP
     jmp PROGRAM_FULL
-LONG_1514:
+LOAD_SIZE_NO_WRAP:
+    cmp ab, 0x7FFF
+    bcc LOAD_SIZE_OK
+    jmp PROGRAM_FULL
+LOAD_SIZE_OK:
     ld (cd), b
     ld (cd+0x01), a
     jmp LOAD_LINE
 LOAD_INSTALL:
-    call EDIT
+    call EDIT_PREPARED
     jmp LOAD_LINE
 LOAD_EOF:
     ld cd, 0x00AC
@@ -2052,7 +2162,7 @@ LOAD_EOF:
     jmp LOAD_DONE
 LONG_1525:
     ; Rewind the immutable byte snapshot, then install. Validation has not
-    ; touched program records or variables. The second pass cannot exceed RAM.
+    ; touched the program chain or variables. The second pass cannot exceed RAM.
     ld a, 0x05
     ld 0xFF10, a
     call FILE_CHECK
@@ -2094,10 +2204,6 @@ FILE_ERROR:
     jmp REPORT_ERROR
 FILE_ERROR_TEXT:
     data "? FILE ERROR", 0x00
-KW_SAVE:
-    data "SAVE", 0x00
-KW_LOAD:
-    data "LOAD", 0x00
 
 PRINT_SHORT:
     inc gh
@@ -2106,8 +2212,6 @@ HELP:
     call EOL
     ld cd, HELP_TEXT
     jmp PUTS
-KW_HELP:
-    data "HELP", 0x00
 HELP_TEXT:
     data "RX-82 native ROM: numbered lines; LIST RUN NEW SAVE LOAD QUIT", 0x0A
     data "LET PRINT INPUT IF THEN GOTO GOSUB RETURN FOR TO STEP NEXT END", 0x0A
@@ -2242,6 +2346,8 @@ BAD_INPUT_CHARACTER:
 INPUT_TOO_LONG:
     ld cd, INPUT_TOO_LONG_TEXT
 DISCARD_INPUT_LINE:
+    ld a, 0x00
+    ld 0x00EE, a
     push cd
     ld cd, 0x00A6
     ld a, (cd)
@@ -2443,8 +2549,6 @@ DIM_CLEAR:
     bne DIM_CLEAR
     pop gh
     ret
-KW_DIM:
-    data "DIM", 0x00
 ARRAY_NOT_DIMENSIONED:
     ld cd, ARRAY_NOT_DIMENSIONED_TEXT
     jmp REPORT_ERROR
@@ -2482,6 +2586,13 @@ IS_STRING_START:
     inc gh
     jmp IS_STRING_START
 IS_STRING_ATOM:
+    cmp a, 0xB1
+    beq IS_STRING_YES
+    cmp a, 0xA0
+    bcc IS_STRING_ASCII
+    cmp a, 0xA4
+    bcc IS_STRING_YES
+IS_STRING_ASCII:
     cmp a, 0x22
     beq IS_STRING_YES
     cmp a, 0x41
@@ -2610,7 +2721,7 @@ STACK_SPACE_ERROR:
     jmp STRING_SPACE
 ; Scratch text is NUL terminated; stable and temporary records are not.
 STACK_FROM_SCRATCH:
-    ld cd, 0x0901
+    ld cd, 0x0E01
     ld b, 0x00
 STACK_SCRATCH_LENGTH:
     ld a, (cd)
@@ -2620,8 +2731,8 @@ STACK_SCRATCH_LENGTH:
     inc cd
     jmp STACK_SCRATCH_LENGTH
 STACK_SCRATCH_READY:
-    ld 0x0900, b
-    ld cd, 0x0900
+    ld 0x0E00, b
+    ld cd, 0x0E00
     jmp STACK_PUSH
 ; Copy B bytes from CD to EF. GH is untouched.
 COPY_STRING_BYTES:
@@ -2717,6 +2828,17 @@ STRING_SEQUENCE_DONE:
     ret
 STRING_ATOM:
     call SPACE
+    cmp a, 0xB1
+    bne STRING_ATOM_TEXT
+    inc gh
+    ld cd, gh
+    ld b, (gh)
+    ld a, 0x00
+    inc ab
+    clc
+    add gh, ab
+    jmp STACK_PUSH
+STRING_ATOM_TEXT:
     cmp a, 0x22
     bne STRING_ATOM_NOT_LITERAL
     jmp STRING_LITERAL
@@ -2762,7 +2884,7 @@ STRING_NOT_CHR:
     ld cd, ab
     jmp STACK_PUSH
 STRING_EMPTY:
-    ld cd, 0x0900
+    ld cd, 0x0E00
     ld (cd), 0x00
     jmp STACK_PUSH
 STRING_PAREN:
@@ -2777,7 +2899,7 @@ STRING_PAREN_CLOSE:
     ret
 STRING_LITERAL:
     inc gh
-    ld ef, 0x0901
+    ld ef, 0x0E01
 STRING_LITERAL_BYTE:
     ld a, (gh)
     inc gh
@@ -2803,7 +2925,7 @@ STRING_APPEND_PRINTABLE:
     bcc STRING_APPEND_VALID
     jmp INVALID_STRING_CHARACTER
 STRING_APPEND_VALID:
-    cmp ef, 0x0A00
+    cmp ef, 0x0F00
     bcc STRING_APPEND_FITS
     jmp STRING_TOO_LONG
 STRING_APPEND_FITS:
@@ -2833,7 +2955,7 @@ INPUT_STRING:
     call PUTCHAR
     call READLINE_STRING
     ld gh, 0x0200
-    ld ef, 0x0901
+    ld ef, 0x0E01
 INPUT_STRING_BYTE:
     ld a, (gh)
     cmp a, 0x00
@@ -3160,8 +3282,6 @@ STRING_SPACE_TEXT:
     data "? STRING SPACE", 0x00
 
 ; LEN(string expression) or LEN(bare array name), returned as a signed integer.
-KW_LEN:
-    data "LEN", 0x00
 LENGTH:
     call SPACE
     cmp a, 0x28
@@ -3263,12 +3383,6 @@ INVALID_STRING_CHARACTER_TEXT:
     data "? INVALID STRING CHARACTER", 0x00
 ; DATA cursor: 00B4 last scanned line, 00BC next item address (zero: scan).
 ; 00BE quoted flag; 00BA candidate next address, committed after assignment.
-KW_DATA:
-    data "DATA", 0x00
-KW_READ:
-    data "READ", 0x00
-KW_RESTORE:
-    data "RESTORE", 0x00
 RESET_DATA:
     ld a, 0x00
     ld 0x00B4, a
@@ -3282,6 +3396,8 @@ RESTORE_DATA:
     bne RESTORE_LINE
     jmp RESET_DATA
 RESTORE_LINE:
+    cmp a, 0xB2
+    beq RESTORE_NUMBER
     cmp a, 0x30
     bcs RESTORE_DIGIT
     jmp INVALID_LINE_NUMBER
@@ -3384,8 +3500,8 @@ DATA_SCAN_LINE:
     ld 0x00B4, f
     ld 0x00B5, e
     ld gh, cd
-    inc gh
-    inc gh
+    clc
+    add gh, 0x0004
     call SPACE
     ld cd, KW_DATA
     call MATCH
@@ -3400,7 +3516,7 @@ DATA_PARSE:
     bne DATA_UNQUOTED
     ld a, 0x01
     ld 0x00BE, a
-    ld ef, 0x0901
+    ld ef, 0x0E01
     inc gh
 DATA_QUOTED_BYTE:
     ld a, (gh)
@@ -3448,7 +3564,7 @@ DATA_UNQUOTED_END:
     jmp INVALID_DATA
 DATA_UNQUOTED_NONEMPTY:
     push ef
-    ld ef, 0x0901
+    ld ef, 0x0E01
 DATA_UNQUOTED_COPY:
     ld a, (gh)
     call STRING_APPEND
@@ -3483,7 +3599,7 @@ DATA_INTEGER:
     beq DATA_INTEGER_UNQUOTED
     jmp TYPE_MISMATCH
 DATA_INTEGER_UNQUOTED:
-    ld gh, 0x0901
+    ld gh, 0x0E01
     ld c, 0x00
     ld a, (gh)
     cmp a, 0x2D
@@ -3540,13 +3656,11 @@ INVALID_DATA_TEXT:
 
 ; Memory addresses accept a bare unsigned literal or the bits of a signed
 ; expression. Literal lookahead only parses source; bus reads happen once.
-KW_PEEK:
-    data "PEEK", 0x00
-KW_POKE:
-    data "POKE", 0x00
 MEM_ADDRESS:
     call SPACE
     push gh
+    cmp a, 0xB0
+    beq MEM_ADDRESS_LITERAL
     cmp a, 0x30
     bcs MEM_ADDRESS_DIGIT
     jmp MEM_ADDRESS_EXPR
@@ -3622,10 +3736,6 @@ BYTE_OUT_OF_RANGE_TEXT:
 
 ; Optional random device: FF20 byte, FF21 status / entropy command,
 ; FF22 seed low byte, FF23 seed high byte (commits a 16-bit seed).
-KW_RND:
-    data "RND", 0x00
-KW_RANDOMIZE:
-    data "RANDOMIZE", 0x00
 RANDOM_DEVICE:
     ld cd, 0xFF21
     ld a, (cd)
@@ -3730,20 +3840,6 @@ RANDOM_SEED_ERROR_TEXT:
     data "? RANDOM SEED FAILED", 0x00
 
 ; String built-ins keep arguments on the temporary stack across recursive calls.
-KW_MID:
-    data "MID$", 0x00
-KW_LEFT:
-    data "LEFT$", 0x00
-KW_RIGHT:
-    data "RIGHT$", 0x00
-KW_CHR:
-    data "CHR$", 0x00
-KW_ASC:
-    data "ASC", 0x00
-KW_VAL:
-    data "VAL", 0x00
-KW_INSTR:
-    data "INSTR", 0x00
 FUNCTION_OPEN:
     call SPACE
     cmp a, 0x28
@@ -3845,11 +3941,11 @@ STRING_SLICE_COUNT_OK:
     clc
     add cd, ab
     ld b, f
-    ld 0x0900, b
-    ld ef, 0x0901
+    ld 0x0E00, b
+    ld ef, 0x0E01
     call COPY_STRING_BYTES
     call STACK_POP
-    ld cd, 0x0900
+    ld cd, 0x0E00
     jmp STACK_PUSH
 STRING_CHR:
     call FUNCTION_OPEN
@@ -3862,10 +3958,10 @@ STRING_CHR:
     cmp ab, 0x007F
     bcs STRING_CHR_INVALID
 STRING_CHR_VALID:
-    ld 0x0901, b
+    ld 0x0E01, b
     ld a, 0x01
-    ld 0x0900, a
-    ld cd, 0x0900
+    ld 0x0E00, a
+    ld cd, 0x0E00
     jmp STACK_PUSH
 STRING_CHR_INVALID:
     jmp INVALID_STRING_CHARACTER
@@ -3890,12 +3986,12 @@ STRING_VAL:
     call STACK_TOP
     ld b, (cd)
     inc cd
-    ld ef, 0x0901
+    ld ef, 0x0E01
     call COPY_STRING_BYTES
     ld (ef), 0x00
     call STACK_POP
     push gh
-    ld gh, 0x0901
+    ld gh, 0x0E01
     call SPACE
     ld c, 0x00
     cmp a, 0x2D
@@ -3950,16 +4046,16 @@ STRING_INSTR_ARGUMENTS:
     call STACK_POP
     call STACK_TOP
     ld b, (cd)
-    ld 0x0900, b
+    ld 0x0E00, b
     inc cd
-    ld ef, 0x0901
+    ld ef, 0x0E01
     call COPY_STRING_BYTES
     ld (ef), 0x00
     call STACK_POP
     pop ef
     push gh
     ld gh, ef
-    ld cd, 0x0900
+    ld cd, 0x0E00
     ld b, (cd)
     ld a, 0x00
     cmp ab, gh
@@ -3994,4 +4090,939 @@ STRING_INSTR_FOUND:
     pop cd
     ld ab, gh
     pop gh
+    ret
+
+; Shared token table: consumed by the ROM and the host codec.
+TOKEN_TABLE:
+KW_END:
+    data 0x80, "END", 0x00
+KW_FOR:
+    data 0x81, "FOR", 0x00
+KW_NEXT:
+    data 0x82, "NEXT", 0x00
+KW_DATA:
+    data 0x83, "DATA", 0x00
+KW_INPUT:
+    data 0x84, "INPUT", 0x00
+KW_DIM:
+    data 0x85, "DIM", 0x00
+KW_READ:
+    data 0x86, "READ", 0x00
+KW_LET:
+    data 0x87, "LET", 0x00
+KW_GOTO:
+    data 0x88, "GOTO", 0x00
+KW_RUN:
+    data 0x89, "RUN", 0x00
+KW_IF:
+    data 0x8A, "IF", 0x00
+KW_RESTORE:
+    data 0x8B, "RESTORE", 0x00
+KW_GOSUB:
+    data 0x8C, "GOSUB", 0x00
+KW_RETURN:
+    data 0x8D, "RETURN", 0x00
+KW_REM:
+    data 0x8E, "REM", 0x00
+KW_STOP:
+    data 0x8F, "STOP", 0x00
+KW_PRINT:
+    data 0x90, "PRINT", 0x00
+KW_LIST:
+    data 0x91, "LIST", 0x00
+KW_NEW:
+    data 0x92, "NEW", 0x00
+KW_SAVE:
+    data 0x93, "SAVE", 0x00
+KW_LOAD:
+    data 0x94, "LOAD", 0x00
+KW_QUIT:
+    data 0x95, "QUIT", 0x00
+KW_HELP:
+    data 0x96, "HELP", 0x00
+KW_THEN:
+    data 0x97, "THEN", 0x00
+KW_TO:
+    data 0x98, "TO", 0x00
+KW_STEP:
+    data 0x99, "STEP", 0x00
+KW_LEN:
+    data 0x9A, "LEN", 0x00
+KW_PEEK:
+    data 0x9B, "PEEK", 0x00
+KW_POKE:
+    data 0x9C, "POKE", 0x00
+KW_RND:
+    data 0x9D, "RND", 0x00
+KW_RANDOMIZE:
+    data 0x9E, "RANDOMIZE", 0x00
+KW_MID:
+    data 0xA0, "MID$", 0x00
+KW_LEFT:
+    data 0xA1, "LEFT$", 0x00
+KW_RIGHT:
+    data 0xA2, "RIGHT$", 0x00
+KW_CHR:
+    data 0xA3, "CHR$", 0x00
+KW_ASC:
+    data 0xA4, "ASC", 0x00
+KW_VAL:
+    data 0xA5, "VAL", 0x00
+KW_INSTR:
+    data 0xA6, "INSTR", 0x00
+TOKEN_TABLE_END:
+    data 0x00
+
+; GH source, EF scratch end. Entry tokenization is the only keyword scan.
+TOKEN_NEXT:
+    call SPACE
+    cmp a, 0x00
+    bne TOKEN_MORE
+    call TOKEN_EMIT
+    ret
+TOKEN_MORE:
+    cmp a, 0x22
+    bne TOKEN_NOT_STRING
+    jmp TOKEN_STRING
+TOKEN_NOT_STRING:
+    cmp a, 0x30
+    bcc TOKEN_NOT_NUMBER
+    cmp a, 0x3A
+    bcs TOKEN_NOT_NUMBER
+    jmp TOKEN_NUMBER
+TOKEN_NOT_NUMBER:
+    cmp a, 0x41
+    bcc TOKEN_SYMBOL
+    cmp a, 0x5B
+    bcs TOKEN_SYMBOL
+    ld cd, TOKEN_TABLE
+TOKEN_KEYWORD:
+    ld a, (cd)
+    cmp a, 0x00
+    beq TOKEN_WORD
+    push cd
+    inc cd
+    call MATCH_TEXT
+    pop cd
+    cmp a, 0x00
+    beq TOKEN_MATCHED
+TOKEN_SKIP_KEYWORD:
+    inc cd
+    ld a, (cd)
+    cmp a, 0x00
+    bne TOKEN_SKIP_KEYWORD
+    inc cd
+    jmp TOKEN_KEYWORD
+TOKEN_MATCHED:
+    ld a, 0x01
+    ld 0x00D3, a
+    ld a, (cd)
+    ld 0x00D4, a
+    call TOKEN_EMIT
+    ld 0x00D2, a
+    cmp a, 0x83
+    beq TOKEN_RAW
+    cmp a, 0x8E
+    beq TOKEN_RAW
+    jmp TOKEN_NEXT
+TOKEN_RAW:
+    ld a, (gh)
+    call TOKEN_EMIT
+    inc gh
+    cmp a, 0x00
+    bne TOKEN_RAW
+    ret
+TOKEN_WORD:
+    call WORD_CHAR
+    beq TOKEN_NEXT
+    call TOKEN_EMIT
+    inc gh
+    ld a, 0x00
+    ld 0x00D2, a
+    ld 0x00D3, a
+    ld 0x00D4, a
+    jmp TOKEN_WORD
+TOKEN_SYMBOL:
+    cmp a, 0x2D
+    bne TOKEN_SYMBOL_POSITIVE
+    ld cd, 0x00D3
+    ld a, (cd)
+    cmp a, 0x00
+    beq TOKEN_SYMBOL_MINUS
+    push gh
+    inc gh
+    call SPACE
+    cmp a, 0x30
+    bcc TOKEN_MINUS_RESTORE
+    cmp a, 0x3A
+    bcs TOKEN_MINUS_RESTORE
+    pop cd
+    call NUMBER
+    cmp ab, 0x8000
+    bcc TOKEN_NEGATE
+    beq TOKEN_NEGATE
+    jmp OVERFLOW
+TOKEN_NEGATE:
+    call NEGATE
+    push ab
+    ld a, 0xB0
+    jmp TOKEN_NUMBER_TAG
+TOKEN_MINUS_RESTORE:
+    pop gh
+TOKEN_SYMBOL_MINUS:
+    ld a, 0x2D
+TOKEN_SYMBOL_POSITIVE:
+    cmp a, 0x3F
+    bne TOKEN_COMPARISON
+    ld a, 0x90
+    jmp TOKEN_SYMBOL_EMIT
+TOKEN_COMPARISON:
+    cmp a, 0x3C
+    beq TOKEN_LESS
+    cmp a, 0x3E
+    bne TOKEN_ASCII
+    ld a, (gh+0x01)
+    cmp a, 0x3D
+    bne TOKEN_ASCII
+    ld a, 0xB5
+    jmp TOKEN_PAIR
+TOKEN_LESS:
+    ld a, (gh+0x01)
+    cmp a, 0x3D
+    beq TOKEN_LE
+    cmp a, 0x3E
+    bne TOKEN_ASCII
+    ld a, 0xB3
+    jmp TOKEN_PAIR
+TOKEN_LE:
+    ld a, 0xB4
+TOKEN_PAIR:
+    inc gh
+    jmp TOKEN_SYMBOL_EMIT
+TOKEN_ASCII:
+    call PEEK
+    ld cd, TOKEN_PUNCTUATION
+TOKEN_VALID_SYMBOL:
+    ld b, (cd)
+    cmp b, 0x00
+    bne TOKEN_CHECK_SYMBOL
+    jmp SYNTAX_ERROR
+TOKEN_CHECK_SYMBOL:
+    cmp a, b
+    beq TOKEN_SYMBOL_EMIT
+    inc cd
+    jmp TOKEN_VALID_SYMBOL
+TOKEN_SYMBOL_EMIT:
+    ld b, 0x01
+    cmp a, 0x29
+    bne TOKEN_SYMBOL_UNARY
+    ld b, 0x00
+TOKEN_SYMBOL_UNARY:
+    ld 0x00D3, b
+    call TOKEN_EMIT
+    inc gh
+    ld a, 0x00
+    ld 0x00D2, a
+    jmp TOKEN_NEXT
+TOKEN_NUMBER:
+    call NUMBER
+    push ab
+    cmp ab, 0x8000
+    bcc TOKEN_NUMBER_RANGE_OK
+    ld cd, 0x00D2
+    ld a, (cd)
+    cmp a, 0x88
+    beq TOKEN_NUMBER_RANGE_OK
+    cmp a, 0x8B
+    beq TOKEN_NUMBER_RANGE_OK
+    cmp a, 0x8C
+    beq TOKEN_NUMBER_RANGE_OK
+    cmp a, 0x97
+    beq TOKEN_NUMBER_RANGE_OK
+    ld cd, 0x00D4
+    ld a, (cd)
+    cmp a, 0x9B
+    beq TOKEN_NUMBER_RANGE_OK
+    cmp a, 0x9C
+    beq TOKEN_NUMBER_RANGE_OK
+    jmp OVERFLOW
+TOKEN_NUMBER_RANGE_OK:
+    ld cd, 0x00D2
+    ld a, (cd)
+    cmp a, 0x88
+    beq TOKEN_REFERENCE
+    cmp a, 0x8B
+    beq TOKEN_REFERENCE
+    cmp a, 0x8C
+    beq TOKEN_REFERENCE
+    cmp a, 0x97
+    beq TOKEN_REFERENCE
+    ld a, 0xB0
+    jmp TOKEN_NUMBER_TAG
+TOKEN_REFERENCE:
+    ld a, 0xB2
+TOKEN_NUMBER_TAG:
+    call TOKEN_EMIT
+    pop ab
+    push a
+    ld a, b
+    call TOKEN_EMIT
+    pop a
+    call TOKEN_EMIT
+    ld a, 0x00
+    ld 0x00D2, a
+    ld 0x00D3, a
+    ld 0x00D4, a
+    jmp TOKEN_NEXT
+TOKEN_STRING:
+    ld a, 0xB1
+    call TOKEN_EMIT
+    ld cd, ef
+    ld a, 0x00
+    call TOKEN_EMIT
+    inc gh
+    ld b, 0x00
+TOKEN_STRING_BYTE:
+    ld a, (gh)
+    inc gh
+    cmp a, 0x00
+    bne TOKEN_STRING_NOT_END
+    jmp UNTERMINATED_STRING
+TOKEN_STRING_NOT_END:
+    cmp a, 0x22
+    beq TOKEN_STRING_END
+    cmp b, 0xFF
+    bne TOKEN_STRING_FITS
+    jmp STRING_TOO_LONG
+TOKEN_STRING_FITS:
+    cmp a, 0x09
+    beq TOKEN_STRING_VALID
+    cmp a, 0x20
+    bcs TOKEN_STRING_HIGH
+    jmp INVALID_STRING_CHARACTER
+TOKEN_STRING_HIGH:
+    cmp a, 0x7F
+    bcc TOKEN_STRING_VALID
+    jmp INVALID_STRING_CHARACTER
+TOKEN_STRING_VALID:
+    call TOKEN_EMIT
+    inc b
+    jmp TOKEN_STRING_BYTE
+TOKEN_STRING_END:
+    push gh
+    push ab
+    ld ab, 0x00ED
+    ld a, (ab)
+    cmp a, 0x00
+    bne TOKEN_STRING_LENGTH_DONE
+    cmp cd, 0x0E00
+    bcs TOKEN_STRING_LENGTH_STORE
+    ld ab, 0x00EC
+    ld a, (ab)
+    cmp a, 0x00
+    beq TOKEN_STRING_LENGTH_STORE
+    sec
+    sub cd, 0x0900
+    ld ab, 0x00E8
+    ld h, (ab)
+    ld g, (ab+0x01)
+    clc
+    add cd, gh
+
+TOKEN_STRING_LENGTH_STORE:
+    pop ab
+    ld (cd), b
+    jmp TOKEN_STRING_LENGTH_END
+TOKEN_STRING_LENGTH_DONE:
+    pop ab
+TOKEN_STRING_LENGTH_END:
+    pop gh
+    ld a, 0x00
+    ld 0x00D2, a
+    ld 0x00D3, a
+    ld 0x00D4, a
+    jmp TOKEN_NEXT
+TOKEN_EMIT:
+    push ab
+    push cd
+    ld cd, 0x00ED
+    ld b, (cd)
+    cmp b, 0x00
+    beq TOKEN_EMIT_STORE
+    cmp ef, 0x88FA
+    bcc TOKEN_EMIT_COUNT
+    jmp INPUT_TOO_LONG
+TOKEN_EMIT_COUNT:
+    inc ef
+    pop cd
+    pop ab
+    ret
+TOKEN_EMIT_STORE:
+    ld cd, 0x00EC
+    ld b, (cd)
+    cmp b, 0x00
+    bne TOKEN_EMIT_STAGED
+    cmp ef, 0x0E00
+    bcc TOKEN_EMIT_BYTE
+    ld cd, 0x00E6
+    ld b, (cd)
+    ld a, (cd+0x01)
+    cmp ab, 0x0000
+    bne TOKEN_SPILL
+    jmp INPUT_TOO_LONG
+TOKEN_SPILL:
+    push gh
+    ld cd, 0x0086
+    ld h, (cd)
+    ld g, (cd+0x01)
+    clc
+    add gh, 0x0004
+    ld 0x00E8, h
+    ld 0x00E9, g
+    ld ef, gh
+    clc
+    add ef, 0x0500
+    cmp ef, 0x8FFE
+    bcc TOKEN_SPILL_FITS
+    jmp INPUT_TOO_LONG
+TOKEN_SPILL_FITS:
+    ld cd, 0x0900
+TOKEN_SPILL_COPY:
+    ld a, (cd)
+    ld (gh), a
+    inc cd
+    inc gh
+    cmp gh, ef
+    bne TOKEN_SPILL_COPY
+    pop gh
+    ld a, 0x01
+    ld 0x00EC, a
+TOKEN_EMIT_STAGED:
+    cmp ef, 0x8FFE
+    bcc TOKEN_EMIT_BYTE
+    jmp INPUT_TOO_LONG
+TOKEN_EMIT_BYTE:
+    pop cd
+    pop ab
+    ld (ef), a
+    inc ef
+    ret
+TOKEN_PUNCTUATION:
+    data "+-*/()=<>;,", 0x00
+; Return Z if the entry character is not part of a word; preserve A.
+WORD_CHAR:
+    call PEEK
+    cmp a, 0x24
+    beq WORD_YES
+    cmp a, 0x30
+    bcc WORD_NO
+    cmp a, 0x3A
+    bcc WORD_YES
+    cmp a, 0x41
+    bcc WORD_NO
+    cmp a, 0x5B
+    bcc WORD_YES
+WORD_NO:
+    cmp a, a
+    ret
+WORD_YES:
+    cmp a, 0x00
+    ret
+; Skip a complete token stream without mistaking binary zeroes for EOL.
+TOKEN_LINE_END:
+    ld a, (gh)
+    inc gh
+    cmp a, 0x00
+    beq TOKEN_LINE_DONE
+    cmp a, 0xB0
+    beq TOKEN_LINE_WORD
+    cmp a, 0xB2
+    beq TOKEN_LINE_WORD
+    cmp a, 0xB1
+    beq TOKEN_LINE_STRING
+    cmp a, 0x83
+    beq TOKEN_LINE_RAW
+    cmp a, 0x8E
+    beq TOKEN_LINE_RAW
+    jmp TOKEN_LINE_END
+TOKEN_LINE_WORD:
+    inc gh
+    inc gh
+    jmp TOKEN_LINE_END
+TOKEN_LINE_STRING:
+    ld b, (gh)
+    ld a, 0x00
+    inc ab
+    clc
+    add gh, ab
+    jmp TOKEN_LINE_END
+TOKEN_LINE_RAW:
+    ld a, (gh)
+    inc gh
+    cmp a, 0x00
+    bne TOKEN_LINE_RAW
+TOKEN_LINE_DONE:
+    ret
+; LIST/SAVE render canonical source directly to the selected output device.
+DETOKENIZE:
+    ld a, (gh)
+    cmp a, 0x00
+    bne DETOKEN_MORE
+    ret
+DETOKEN_MORE:
+    cmp a, 0xB0
+    beq DETOKEN_NUMBER
+    cmp a, 0xB2
+    beq DETOKEN_NUMBER
+    inc gh
+    cmp a, 0xB1
+    beq DETOKEN_STRING
+    cmp a, 0xB3
+    bcc DETOKEN_NOT_OPERATOR
+    cmp a, 0xB6
+    bcs DETOKEN_NOT_OPERATOR
+    push a
+    cmp a, 0xB5
+    beq DETOKEN_GREATER
+    ld a, 0x3C
+    jmp DETOKEN_OPERATOR_FIRST
+DETOKEN_GREATER:
+    ld a, 0x3E
+DETOKEN_OPERATOR_FIRST:
+    call PUTCHAR
+    pop a
+    cmp a, 0xB3
+    beq DETOKEN_NOT_EQUAL
+    ld a, 0x3D
+    jmp DETOKEN_CHAR
+DETOKEN_NOT_EQUAL:
+    ld a, 0x3E
+    jmp DETOKEN_CHAR
+DETOKEN_NOT_OPERATOR:
+    cmp a, 0x80
+    bcs DETOKEN_KEYWORD
+DETOKEN_CHAR:
+    call PUTCHAR
+    jmp DETOKENIZE
+DETOKEN_NUMBER:
+    ld b, a
+    call NUMBER
+    push ab
+    ld a, (gh)
+    pop ab
+    ; Line references are unsigned; ordinary constants are signed.
+    push gh
+    dec gh
+    dec gh
+    dec gh
+    ld c, (gh)
+    pop gh
+    cmp c, 0xB2
+    beq DETOKEN_LINE_NUMBER
+    call PRINT_NUM
+    jmp DETOKENIZE
+DETOKEN_LINE_NUMBER:
+    call PRINT_LINE
+    jmp DETOKENIZE
+DETOKEN_STRING:
+    ld b, (gh)
+    inc gh
+    ld a, 0x22
+    call PUTCHAR
+DETOKEN_STRING_BYTE:
+    cmp b, 0x00
+    beq DETOKEN_STRING_END
+    ld a, (gh)
+    call PUTCHAR
+    inc gh
+    dec b
+    jmp DETOKEN_STRING_BYTE
+DETOKEN_STRING_END:
+    ld a, 0x22
+    jmp DETOKEN_CHAR
+DETOKEN_KEYWORD:
+    ld b, a
+    cmp a, 0x97
+    bcc DETOKEN_LOOKUP
+    cmp a, 0x9A
+    bcs DETOKEN_LOOKUP
+    ld a, 0x20
+    call PUTCHAR
+DETOKEN_LOOKUP:
+    ld cd, TOKEN_TABLE
+DETOKEN_SEARCH:
+    ld a, (cd)
+    inc cd
+    cmp a, b
+    beq DETOKEN_FOUND
+DETOKEN_SKIP:
+    ld a, (cd)
+    inc cd
+    cmp a, 0x00
+    bne DETOKEN_SKIP
+    jmp DETOKEN_SEARCH
+DETOKEN_FOUND:
+    push b
+    call PUTS
+    pop b
+    cmp b, 0x83
+    beq DETOKEN_RAW
+    cmp b, 0x8E
+    beq DETOKEN_RAW
+    cmp b, 0x9C
+    beq DETOKEN_KEYWORD_SPACE
+    cmp b, 0x9E
+    beq DETOKEN_KEYWORD_SPACE
+    cmp b, 0x9A
+    bcc TOKEN_LONG_0_0
+    jmp DETOKENIZE
+TOKEN_LONG_0_0:
+DETOKEN_KEYWORD_SPACE:
+    ld a, (gh)
+    cmp a, 0x00
+    bne TOKEN_LONG_0_1
+    jmp DETOKENIZE
+TOKEN_LONG_0_1:
+    ld a, 0x20
+    jmp DETOKEN_CHAR
+DETOKEN_RAW:
+    ld cd, gh
+    jmp PUTS
+
+; Streaming entry: lexical items start at 0200 and spill to A000. Token bytes
+; start at 0900 and large numbered lines spill beyond the old end marker.
+; ED discards token bytes during LOAD validation; EE tracks an unfinished line.
+READ_TOKEN_LINE:
+    ld a, 0x00
+    ld 0x00E6, a
+    ld 0x00E7, a
+    ld 0x00EC, a
+    ld 0x00ED, a
+    ld 0x00D2, a
+    ld 0x00D4, a
+    ld 0x00D9, a
+    ld a, 0x01
+    ld 0x00EE, a
+    ld 0x00D3, a
+    ld cd, 0x00A6
+    ld a, (cd)
+    cmp a, 0x00
+    beq STREAM_INIT
+    ld cd, 0x00AC
+    ld a, (cd)
+    cmp a, 0x00
+    bne STREAM_INIT
+    ld a, 0x01
+    ld 0x00ED, a
+STREAM_INIT:
+    ld ef, 0x0900
+    ld 0x00E8, f
+    ld 0x00E9, e
+    call STREAM_GET
+    call STREAM_SPACE
+    cmp a, 0x30
+    bcc STREAM_BODY
+    cmp a, 0x3A
+    bcs STREAM_BODY
+    call STREAM_BUFFER_START
+STREAM_LINE_DIGIT:
+    call STREAM_BUFFER
+    call STREAM_GET
+    cmp a, 0x30
+    bcc STREAM_LINE_NUMBER
+    cmp a, 0x3A
+    bcc STREAM_LINE_DIGIT
+STREAM_LINE_NUMBER:
+    call STREAM_BUFFER_END
+    call NUMBER
+    cmp ab, 0x0000
+    bne STREAM_LINE_VALID
+    jmp INVALID_LINE_NUMBER
+STREAM_LINE_VALID:
+    ld 0x00E6, b
+    ld 0x00E7, a
+STREAM_BODY:
+    call STREAM_CURRENT
+    call STREAM_SPACE
+    cmp a, 0x00
+    bne STREAM_ITEM
+    call TOKEN_EMIT
+    ret
+STREAM_ITEM:
+    call STREAM_BUFFER_START
+    cmp a, 0x22
+    beq STREAM_STRING
+    cmp a, 0x2D
+    beq STREAM_MINUS
+    cmp a, 0x3C
+    beq STREAM_COMPARE
+    cmp a, 0x3E
+    beq STREAM_COMPARE
+    call STREAM_IS_WORD
+    bne STREAM_WORD
+    call STREAM_BUFFER
+    call STREAM_GET
+    jmp STREAM_ENCODE
+STREAM_WORD:
+    call STREAM_BUFFER
+    call STREAM_GET
+    call STREAM_IS_WORD
+    bne STREAM_WORD
+    jmp STREAM_ENCODE
+STREAM_MINUS:
+    call STREAM_BUFFER
+    call STREAM_GET
+    push cd
+    ld cd, 0x00D3
+    ld a, (cd)
+    pop cd
+    cmp a, 0x00
+    beq STREAM_ENCODE
+    call STREAM_CURRENT
+    call STREAM_SPACE
+    cmp a, 0x30
+    bcc STREAM_ENCODE
+    cmp a, 0x3A
+    bcs STREAM_ENCODE
+    jmp STREAM_WORD
+STREAM_COMPARE:
+    call STREAM_BUFFER
+    call STREAM_GET
+    cmp a, 0x3D
+    beq STREAM_COMPARE_SECOND
+    cmp a, 0x3E
+    bne STREAM_ENCODE
+    ld gh, 0x0200
+    ld b, (gh)
+    cmp b, 0x3C
+    bne STREAM_ENCODE
+STREAM_COMPARE_SECOND:
+    call STREAM_BUFFER
+    call STREAM_GET
+    jmp STREAM_ENCODE
+STREAM_STRING:
+    ld b, 0x01
+    ld 0x00D9, b
+    call STREAM_BUFFER
+STREAM_STRING_MORE:
+    call STREAM_GET
+    cmp a, 0x00
+    bne STREAM_STRING_BYTE
+    jmp UNTERMINATED_STRING
+STREAM_STRING_BYTE:
+    call STREAM_BUFFER
+    cmp a, 0x22
+    bne STREAM_STRING_MORE
+    ld b, 0x00
+    ld 0x00D9, b
+    call STREAM_GET
+STREAM_ENCODE:
+    call STREAM_BUFFER_END
+    call TOKEN_NEXT
+    dec ef
+    ld cd, 0x00D2
+    ld a, (cd)
+    cmp a, 0x83
+    beq STREAM_RAW
+    cmp a, 0x8E
+    beq STREAM_RAW
+    jmp STREAM_BODY
+STREAM_RAW:
+    call STREAM_CURRENT
+    call TOKEN_EMIT
+    cmp a, 0x00
+    beq STREAM_DONE
+    call STREAM_GET
+    jmp STREAM_RAW
+STREAM_DONE:
+    ret
+STREAM_BUFFER_START:
+    ld cd, 0x0200
+    ld 0x00DA, d
+    ld 0x00DB, c
+    ret
+STREAM_BUFFER_END:
+    ld a, 0x00
+    call STREAM_BUFFER
+    ld cd, 0x00DA
+    ld h, (cd)
+    ld g, (cd+0x01)
+    ret
+STREAM_BUFFER:
+    cmp cd, 0x0300
+    bne STREAM_BUFFER_ROOM
+    push ab
+    push ef
+    push gh
+    ld gh, 0x0200
+    ld ef, 0xA000
+STREAM_BUFFER_SPILL:
+    ld b, (gh)
+    ld (ef), b
+    inc gh
+    inc ef
+    cmp gh, 0x0300
+    bne STREAM_BUFFER_SPILL
+    ld cd, ef
+    ld gh, 0xA000
+    ld 0x00DA, h
+    ld 0x00DB, g
+    pop gh
+    pop ef
+    pop ab
+STREAM_BUFFER_ROOM:
+    cmp cd, 0xA400
+    bcc STREAM_BUFFER_FITS
+    jmp INPUT_TOO_LONG
+STREAM_BUFFER_FITS:
+    ld (cd), a
+    inc cd
+    ret
+STREAM_SPACE:
+    cmp a, 0x20
+    beq STREAM_SKIP
+    cmp a, 0x09
+    bne STREAM_DONE
+STREAM_SKIP:
+    call STREAM_GET
+    jmp STREAM_SPACE
+STREAM_CURRENT:
+    push cd
+    ld cd, 0x00D8
+    ld a, (cd)
+    pop cd
+    ret
+STREAM_GET:
+    call GETCHAR
+    cmp a, 0x0D
+    beq STREAM_GET
+    cmp a, 0x0A
+    beq STREAM_END
+    cmp a, 0xFF
+    beq STREAM_END
+    cmp a, 0x09
+    beq STREAM_GOT
+    cmp a, 0x20
+    bcc STREAM_BAD
+    cmp a, 0x7F
+    bcc STREAM_GOT
+STREAM_BAD:
+    ld cd, 0x00D9
+    ld a, (cd)
+    cmp a, 0x00
+    beq STREAM_BAD_ASCII
+    jmp INVALID_STRING_CHARACTER
+STREAM_BAD_ASCII:
+    jmp BAD_INPUT_CHARACTER
+STREAM_END:
+    ld a, 0x00
+    ld 0x00EE, a
+STREAM_GOT:
+    ld 0x00D8, a
+    ret
+STREAM_IS_WORD:
+    cmp a, 0x24
+    beq STREAM_WORD_YES
+    cmp a, 0x30
+    bcc STREAM_WORD_NO
+    cmp a, 0x3A
+    bcc STREAM_WORD_YES
+    cmp a, 0x41
+    bcc STREAM_WORD_NO
+    cmp a, 0x5B
+    bcc STREAM_WORD_YES
+    cmp a, 0x61
+    bcc STREAM_WORD_NO
+    cmp a, 0x7B
+    bcc STREAM_WORD_YES
+STREAM_WORD_NO:
+    cmp a, a
+    ret
+STREAM_WORD_YES:
+    cmp a, 0x00
+    ret
+; The complete large line is already staged after the old chain. Remove a
+; replaced record, then rotate the appended record into sorted position.
+EDIT_STAGED:
+    push gh
+    ld gh, cd
+    ld ef, 0x00E6
+    ld a, (ef)
+    ld (gh+0x02), a
+    ld a, (ef+0x01)
+    ld (gh+0x03), a
+    ld ef, 0x00E4
+    ld b, (ef)
+    ld a, (ef+0x01)
+    clc
+    add cd, ab
+    ld 0x00EA, d
+    ld 0x00EB, c
+    ld cd, 0x00E0
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, 0x00E2
+    ; Load a pointer through a separate pair to avoid changing its base early.
+    ld cd, 0x00E2
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld cd, ab
+    ld ab, ef
+    sec
+    sub ab, cd
+    clc
+    add gh, ab
+    ld 0x00E2, h
+    ld 0x00E3, g
+    ld gh, 0x00EA
+    ld b, (gh)
+    ld a, (gh+0x01)
+EDIT_STAGE_SLIDE:
+    cmp cd, ab
+    beq EDIT_STAGE_ROTATE
+    ld g, (cd)
+    ld (ef), g
+    inc cd
+    inc ef
+    jmp EDIT_STAGE_SLIDE
+EDIT_STAGE_ROTATE:
+    pop gh
+    ld (gh), 0x00
+    inc gh
+    ld (gh), 0x00
+    ld cd, 0x00E0
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, 0x00E2
+    ld h, (cd)
+    ld g, (cd+0x01)
+    call REVERSE_BYTES
+    ld cd, 0x00E2
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, 0x0086
+    ld h, (cd)
+    ld g, (cd+0x01)
+    call REVERSE_BYTES
+    ld cd, 0x00E0
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, 0x0086
+    ld h, (cd)
+    ld g, (cd+0x01)
+    call REVERSE_BYTES
+    jmp EDIT_LINKS
+REVERSE_BYTES:
+    cmp ef, gh
+    bcs REVERSE_DONE
+    dec gh
+    cmp ef, gh
+    bcs REVERSE_DONE
+    ld a, (ef)
+    ld b, (gh)
+    ld (ef), b
+    ld (gh), a
+    inc ef
+    jmp REVERSE_BYTES
+REVERSE_DONE:
     ret

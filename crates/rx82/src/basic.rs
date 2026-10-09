@@ -7,10 +7,11 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use anyhow::{Context as _, Result, bail, ensure};
 use core::cell::RefCell;
+#[path = "basic_tokens.rs"]
+mod tokens;
 use std::io::{BufRead, Write};
 
 /// BASIC program storage, signed 16-bit integers, arrays, and ASCII strings.
-#[derive(Default)]
 pub struct Basic {
     random: RefCell<Option<crate::random::RandomDevice>>,
     pool: RefCell<StringPool>,
@@ -21,8 +22,25 @@ pub struct Basic {
     data_offset: Option<usize>,
     arrays: BTreeMap<String, Vec<i16>>,
     strings: BTreeMap<String, String>,
-    lines: BTreeMap<u16, String>,
+    lines: tokens::Program,
     vars: BTreeMap<String, i16>,
+}
+
+impl Default for Basic {
+    fn default() -> Self {
+        Self {
+            random: RefCell::new(None),
+            pool: RefCell::new(StringPool::default()),
+            string_arrays: BTreeMap::new(),
+            memory: BTreeMap::from([(0x87, 0x10)]),
+            data_line: 0,
+            data_offset: None,
+            arrays: BTreeMap::new(),
+            strings: BTreeMap::new(),
+            lines: tokens::Program::default(),
+            vars: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,6 +49,7 @@ enum Token {
     Word(String),
     Text(String),
     Symbol(char),
+    Comparison(u8),
 }
 
 /// Mirror the guest's physical allocation and temporary-space accounting.
@@ -118,66 +137,6 @@ impl StringPool {
     }
 }
 
-fn lex(source: &str) -> Result<Vec<Token>> {
-    let mut chars = source.chars().peekable();
-    let mut tokens = Vec::new();
-    while let Some(character) = chars.next() {
-        if character.is_whitespace() {
-            continue;
-        }
-        if character == '"' {
-            let mut value = String::new();
-            loop {
-                let next = chars.next().context("unterminated string")?;
-                if next == '"' {
-                    break;
-                }
-                value.push(next);
-            }
-            tokens.push(Token::Text(value));
-        } else if character.is_ascii_digit() {
-            let mut value = character.to_string();
-            while chars.peek().is_some_and(char::is_ascii_digit) {
-                if let Some(next) = chars.next() {
-                    value.push(next);
-                }
-            }
-            tokens.push(Token::Number(
-                value.parse().context("integer out of range")?,
-            ));
-        } else if character.is_ascii_alphabetic() {
-            let mut value = character.to_string();
-            while chars.peek().is_some_and(char::is_ascii_alphanumeric) {
-                if let Some(next) = chars.next() {
-                    value.push(next);
-                }
-            }
-            if chars.peek() == Some(&'$') {
-                chars.next();
-                value.push('$');
-            }
-            let word = value.to_ascii_uppercase();
-            let remark = word == "REM";
-            let data = word == "DATA";
-            tokens.push(Token::Word(word));
-            if data {
-                tokens.push(Token::Text(chars.collect()));
-                break;
-            }
-            if remark {
-                break;
-            }
-        } else {
-            ensure!(
-                "+-*/()=<>;,?".contains(character),
-                "unexpected character: {character}"
-            );
-            tokens.push(Token::Symbol(character));
-        }
-    }
-    Ok(tokens)
-}
-
 struct Parser<'source> {
     random: &'source RefCell<Option<crate::random::RandomDevice>>,
     pool: &'source RefCell<StringPool>,
@@ -199,18 +158,6 @@ fn check_string(value: &str) -> Result<()> {
         "invalid string character"
     );
     Ok(())
-}
-
-fn data_body(source: &str) -> Option<&str> {
-    let source = source.trim_start();
-    if !source.get(..4)?.eq_ignore_ascii_case("DATA") {
-        return None;
-    }
-    let body = source.get(4..)?;
-    if body.starts_with(|character: char| character.is_ascii_alphanumeric() || character == '$') {
-        return None;
-    }
-    Some(body)
 }
 
 #[expect(
@@ -494,7 +441,11 @@ impl Parser<'_> {
             )
         {
             self.pos = self.pos.saturating_add(1);
-            return u16::try_from(number).context("integer overflow");
+            return Ok(u16::from_le_bytes(
+                i16::try_from(number)
+                    .context("integer overflow")?
+                    .to_le_bytes(),
+            ));
         }
         Ok(u16::from_le_bytes(self.expression()?.to_le_bytes()))
     }
@@ -587,7 +538,7 @@ impl Parser<'_> {
                 value
             }
             Token::Text(_) => bail!("type mismatch"),
-            Token::Symbol(_) => bail!("expected expression"),
+            Token::Symbol(_) | Token::Comparison(_) => bail!("expected expression"),
         };
         while let Some(Token::Symbol(op)) = self.tokens.get(self.pos).cloned() {
             let precedence = match op {
@@ -645,10 +596,11 @@ struct LoopFrame {
     clippy::single_call_fn,
     reason = "separate structural loop validation from execution"
 )]
-fn loop_pairs(program: &BTreeMap<u16, Vec<Token>>) -> Result<BTreeMap<u16, u16>> {
+fn loop_pairs(program: &tokens::Program) -> Result<BTreeMap<u16, u16>> {
     let mut pending: Vec<(u16, String)> = Vec::new();
     let mut pairs = BTreeMap::new();
-    for (&line, tokens) in program {
+    for (line, bytes) in program.iter() {
+        let tokens = tokens::decode(bytes)?;
         match tokens.first().cloned() {
             Some(Token::Word(word)) if word == "FOR" => {
                 let Some(Token::Word(name)) = tokens.get(1).cloned() else {
@@ -681,19 +633,32 @@ impl Basic {
     pub fn attach_random(&mut self, device: crate::random::RandomDevice) {
         *self.random.get_mut() = Some(device);
     }
+    /// Packed program bytes, including the terminating zero pair.
+    pub fn program_image(&self) -> &[u8] {
+        self.lines.image()
+    }
+    /// Guest address of the terminating pair.
+    pub fn program_end(&self) -> u16 {
+        self.lines.end()
+    }
+    fn sync_program_memory(&mut self) {
+        for (address, &byte) in (0x1000..=0x8fff).zip(self.lines.image()) {
+            self.memory.insert(address, byte);
+        }
+        let [low, high] = self.lines.end().to_le_bytes();
+        self.memory.insert(0x86, low);
+        self.memory.insert(0x87, high);
+    }
     fn reset_data(&mut self) {
         self.data_line = 0;
         self.data_offset = None;
     }
     fn data_item(&mut self) -> Result<(String, bool, Option<usize>)> {
         if self.data_offset.is_none() {
-            let (&line, _) = self
+            let (line, _) = self
                 .lines
-                .range((
-                    core::ops::Bound::Excluded(self.data_line),
-                    core::ops::Bound::Unbounded,
-                ))
-                .find(|&(_, body)| data_body(body).is_some())
+                .iter()
+                .find(|&(line, body)| line > self.data_line && body.first() == Some(&0x83))
                 .context("out of DATA")?;
             self.data_line = line;
             self.data_offset = Some(0);
@@ -701,8 +666,9 @@ impl Basic {
         let offset = self.data_offset.context("out of DATA")?;
         let body = self
             .lines
-            .get(&self.data_line)
-            .and_then(|body| data_body(body))
+            .get(self.data_line)
+            .filter(|body| body.first() == Some(&0x83))
+            .and_then(|body| core::str::from_utf8(body.get(1..body.len().strict_sub(1))?).ok())
             .context("out of DATA")?;
         let (value, quoted, next) = data_constant(body.get(offset..).context("invalid DATA")?)?;
         check_string(&value)?;
@@ -771,6 +737,7 @@ impl Basic {
             ensure!(program.edit(line)?, "file requires numbered lines");
         }
         self.lines = program.lines;
+        self.sync_program_memory();
         self.vars.clear();
         self.arrays.clear();
         self.strings.clear();
@@ -780,19 +747,18 @@ impl Basic {
         Ok(())
     }
     fn edit(&mut self, source: &str) -> Result<bool> {
-        let source = source.trim();
+        let source = source.trim_start();
         let count = source.bytes().take_while(u8::is_ascii_digit).count();
         if count == 0 {
             return Ok(false);
         }
         let number: u16 = source.get(..count).context("invalid line")?.parse()?;
         ensure!(number > 0, "line number must be 1..65535");
-        let body = source.get(count..).context("invalid line")?.trim();
-        if body.is_empty() {
-            self.lines.remove(&number);
-        } else {
-            self.lines.insert(number, body.to_owned());
-        }
+        let body = source.get(count..).context("invalid line")?.trim_start();
+        self.lines
+            .edit(number, body)
+            .with_context(|| format!("in line {number}"))?;
+        self.sync_program_memory();
         self.reset_data();
         Ok(true)
     }
@@ -823,6 +789,10 @@ impl Basic {
         self.pool.borrow_mut().temporaries.clear();
         result
     }
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "one branch per BASIC statement"
+    )]
     fn statement_body(
         &mut self,
         tokens: &[Token],
@@ -875,7 +845,7 @@ impl Basic {
                 let line = u16::try_from(number).context("invalid line number")?;
                 ensure!(line != 0, "invalid line number");
                 parser.end()?;
-                ensure!(self.lines.contains_key(&line), "undefined line {line}");
+                ensure!(self.lines.contains_key(line), "undefined line {line}");
                 line.saturating_sub(1)
             };
             self.data_line = line;
@@ -960,12 +930,13 @@ impl Basic {
             } else {
                 0
             };
-            let Some(Token::Symbol(op @ ('=' | '<' | '>'))) = parser.next() else {
-                bail!("expected comparison");
+            let (op, equal, unequal) = match parser.next() {
+                Some(Token::Symbol(op @ ('=' | '<' | '>'))) => (op, false, false),
+                Some(Token::Comparison(0xb3)) => ('<', false, true),
+                Some(Token::Comparison(0xb4)) => ('<', true, false),
+                Some(Token::Comparison(0xb5)) => ('>', true, false),
+                _ => bail!("expected comparison"),
             };
-            let equal = parser.symbol('=');
-            let unequal = op == '<' && !equal && parser.symbol('>');
-            ensure!(op != '=' || !equal, "use = for equality");
             let ordering = if let Some(text) = text {
                 let ordering = text.cmp(&parser.string_expression()?);
                 self.pool.borrow_mut().pop();
@@ -1115,32 +1086,19 @@ impl Basic {
         self.string_arrays.clear();
         *self.pool.get_mut() = StringPool::default();
         self.reset_data();
-        let program: BTreeMap<u16, Vec<Token>> = self
-            .lines
-            .iter()
-            .map(|(&line, source)| {
-                lex(source)
-                    .map(|tokens| (line, tokens))
-                    .with_context(|| format!("in line {line}"))
-            })
-            .collect::<Result<_>>()?;
+        let program = self.lines.clone();
         let pairs = loop_pairs(&program)?;
-        let after = |line| {
-            program
-                .range((
-                    core::ops::Bound::Excluded(line),
-                    core::ops::Bound::Unbounded,
-                ))
-                .next()
-                .map(|(&number, _)| number)
-        };
-        let mut pc = program.keys().next().copied();
+        let after = |line| program.record(program.find(line)?).map(|(next, _, _)| next);
+        let mut pc = Some(0x1000);
         let mut stack: Vec<(Option<u16>, usize)> = Vec::new();
         let mut loops: Vec<LoopFrame> = Vec::new();
-        while let Some(line) = pc {
-            let tokens = program.get(&line).context("missing line")?;
-            let next = after(line);
-            let flow = self.statement(tokens, input, output).map_err(|error| {
+        while let Some(address) = pc {
+            let Some((next, line, bytes)) = program.record(address) else {
+                break;
+            };
+            let tokens = tokens::decode(bytes)?;
+            let next = Some(next);
+            let flow = self.statement(&tokens, input, output).map_err(|error| {
                 if matches!(
                     error.to_string().as_str(),
                     "STRING SPACE" | "STRING TOO LONG"
@@ -1155,7 +1113,7 @@ impl Basic {
                 Flow::Next => next,
                 Flow::Jump(target) | Flow::Call(target) => {
                     ensure!(
-                        program.contains_key(&target),
+                        program.contains_key(target),
                         "undefined line {target} in line {line}"
                     );
                     if matches!(flow, Flow::Call(_)) {
@@ -1171,14 +1129,14 @@ impl Basic {
                             loops.pop();
                         }
                     }
-                    Some(target)
+                    program.find(target)
                 }
                 Flow::Return => {
-                    let (address, depth) = stack
+                    let (return_address, depth) = stack
                         .pop()
                         .with_context(|| format!("RETURN without GOSUB in line {line}"))?;
                     loops.truncate(depth);
-                    address
+                    return_address
                 }
                 Flow::End => None,
                 Flow::For {
@@ -1277,6 +1235,7 @@ impl Basic {
             "RUN" => return self.run(input, output),
             "NEW" => {
                 self.lines.clear();
+                self.sync_program_memory();
                 self.vars.clear();
                 self.arrays.clear();
                 self.strings.clear();
@@ -1286,8 +1245,8 @@ impl Basic {
                 return Ok(());
             }
             "LIST" => {
-                for (number, body) in &self.lines {
-                    writeln!(output, "{number} {body}")?;
+                for (number, body) in self.lines.iter() {
+                    writeln!(output, "{number} {}", tokens::text(body)?)?;
                 }
                 return Ok(());
             }
@@ -1316,7 +1275,7 @@ impl Basic {
             }
             _ => {}
         }
-        let tokens = lex(source)?;
+        let tokens = tokens::decode(&tokens::encode(source)?)?;
         if let Some(Token::Word(command)) = tokens.first().cloned()
             && (command == "SAVE" || command == "LOAD")
         {
@@ -1330,8 +1289,8 @@ impl Basic {
             ensure!(!path.is_empty(), "filename must not be empty");
             if command == "SAVE" {
                 let mut contents = Vec::new();
-                for (number, body) in &self.lines {
-                    writeln!(contents, "{number} {body}")?;
+                for (number, body) in self.lines.iter() {
+                    writeln!(contents, "{number} {}", tokens::text(body)?)?;
                 }
                 std::fs::write(path, contents).with_context(|| format!("saving {path}"))?;
             } else {

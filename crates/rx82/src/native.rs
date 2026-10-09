@@ -397,12 +397,12 @@ mod tests {
     #[test]
     fn native_peek_and_poke_access_variables_arrays_strings_and_source() {
         let (sys, output) = session(
-            "10 PRINT 1\nA=4660\nDIM B(1)\nB(1)=1027\nC$=\"cat\"\nPRINT PEEK(768),PEEK(769),PEEK(36866),PEEK(4096),PEEK(4098)\nPOKE 768,120\nPOKE 36866,255\nPOKE 61185,98\nPOKE 4104,50\nPRINT A,B(1),C$\nRUN\nQUIT\n",
+            "10 PRINT 1\nA=4660\nDIM B(1)\nB(1)=1027\nC$=\"cat\"\nPRINT PEEK(768),PEEK(769),PEEK(36866),PEEK(4098),PEEK(4100)\nPOKE 768,120\nPOKE 36866,255\nPOKE 61185,98\nPOKE 4102,2\nPRINT A,B(1),C$\nRUN\nQUIT\n",
         );
-        assert!(output.contains("52\t18\t3\t10\t80\n"), "{output}");
+        assert!(output.contains("52\t18\t3\t10\t144\n"), "{output}");
         assert!(output.contains("4728\t1279\tbat\n"), "{output}");
         assert!(output.contains("> 2\n"), "{output}");
-        assert_eq!(sys.mem.get(4104), b'2');
+        assert_eq!(sys.mem.get(4102), 2);
     }
 
     #[test]
@@ -538,7 +538,7 @@ mod tests {
         use crate::monitor::StopReason;
         let mut monitor = debug_monitor("10 A=42\n20 PRINT A\n30 END", true).unwrap();
         assert_eq!(monitor.sys.mem.get(0x1000), 10);
-        assert_eq!(monitor.sys.mem.get(0x1002), b'A');
+        assert_eq!(monitor.sys.mem.get(0x1004), b'A');
         assert_eq!(monitor.sys.mem.get(0x0300), 0);
         assert_eq!(monitor.sys.mem.get(0x0082), 0);
         let mut output = Vec::new();
@@ -579,6 +579,80 @@ mod tests {
         assert!(ROM.len() <= 0x2E00);
     }
     #[test]
+    fn native_long_lines_and_full_window_preserve_chain() {
+        for source in [
+            format!("30 END\n10 PRINT 7\n20 REM {}\nRUN", "x".repeat(2000)),
+            format!(
+                "10 REM {}\n10 REM {}\n20 END\nRUN",
+                "x".repeat(1800),
+                "y".repeat(2200)
+            ),
+            format!("10 PRINT \"{}\"\nRUN", "x".repeat(255)),
+        ] {
+            let mut host = crate::basic::Basic::default();
+            let numbered = source.strip_suffix("\nRUN").unwrap();
+            host.load(numbered).unwrap();
+            let (sys, output) = session_with_budget(&format!("{source}\nQUIT\n"), 100_000_000);
+            assert!(!output.contains("? "), "{output}");
+            let image: Vec<_> = (0..host.program_image().len())
+                .map(|i| {
+                    sys.mem
+                        .get(0x1000_u16.strict_add(u16::try_from(i).unwrap()))
+                })
+                .collect();
+            assert_eq!(image, host.program_image());
+        }
+        let source = format!("10 REM {}", "x".repeat(0x7FF7));
+        let mut host = crate::basic::Basic::default();
+        host.load(&source).unwrap();
+        let (sys, output) = session_with_budget(&format!("{source}\n20 END\nQUIT\n"), 100_000_000);
+        assert!(output.contains("? PROGRAM FULL"), "{output}");
+        let image: Vec<_> = (0..host.program_image().len())
+            .map(|i| {
+                sys.mem
+                    .get(0x1000_u16.strict_add(u16::try_from(i).unwrap()))
+            })
+            .collect();
+        assert_eq!(image, host.program_image());
+    }
+
+    #[test]
+    fn native_listing_keeps_statement_keyword_boundaries() {
+        let (_, output) = session("10 POKE 256,7\n20 RANDOMIZE 42\nLIST\nQUIT\n");
+        assert!(
+            output.contains("10 POKE 256,7\n20 RANDOMIZE 42\n"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn native_token_chain_matches_reference_after_edits() {
+        for source in [
+            "10 PRINT \"HI\"",
+            "30 END\n10 PRINT \"HI\"\n20 PRINT INSTR(\"abc\",MID$(\"abcd\",2,2))",
+            "30 END\n10 PRINT \"HI\"\n20 PRINT 12\n20",
+            "10 PRINT -32768,- 1\n20 GOTO 30+10\n40 END",
+            "10 REM raw PRINT 123 ?\n20 DATA 1,\"raw\"\n30 IF 1<=2 THEN 65535\n65535 END",
+        ] {
+            let mut host = crate::basic::Basic::default();
+            host.load(source).unwrap();
+            let (sys, output) = session(&format!("{source}\nLIST\nQUIT\n"));
+            assert!(!output.contains("? "), "{output}");
+            let image: Vec<_> = (0..host.program_image().len())
+                .map(|offset| {
+                    sys.mem
+                        .get(0x1000_u16.strict_add(u16::try_from(offset).unwrap()))
+                })
+                .collect();
+            assert_eq!(image, host.program_image(), "{source}");
+            assert_eq!(
+                u16::from_le_bytes([sys.mem.get(0x86), sys.mem.get(0x87)]),
+                host.program_end()
+            );
+        }
+    }
+
+    #[test]
     fn native_editor_and_execution_use_guest_ram() {
         let (sys, output) = session("20 PRINT A\n10 LET A=42\n30 END\nLIST\nRUN\nQUIT\n");
         assert!(
@@ -587,7 +661,7 @@ mod tests {
         );
         assert!(output.contains("42\n"), "{output}");
         assert_eq!(sys.mem.get(0x0300), 42);
-        assert_eq!(sys.mem.get(0x1000), 20);
+        assert_eq!(sys.mem.get(0x1002), 10);
         assert!(sys.cpu.pc >= ROM_START);
     }
     #[test]
@@ -666,7 +740,6 @@ mod tests {
             ("10 FOR I=32767 TO 32767\n20 NEXT I", "INTEGER OVERFLOW", 20),
             ("10 GOSUB 10", "GOSUB STACK FULL", 10),
             ("10 A 3", "EXPECTED =", 10),
-            ("10 PRINT \"hello", "UNTERMINATED STRING", 10),
             ("10 PRINT (1+2", "EXPECTED )", 10),
             ("10 LET 1=2", "EXPECTED VARIABLE A-Z", 10),
             ("10 IF 1 THEN PRINT 2", "EXPECTED COMPARISON", 10),
@@ -709,39 +782,34 @@ mod tests {
     }
 
     #[test]
-    fn native_full_program_preserves_records_and_allows_editing() {
+    fn native_program_accepts_more_than_256_lines() {
         use core::fmt::Write as _;
         let mut source = String::new();
-        for line in 1..=256_u16 {
+        for line in 1..=257_u16 {
             writeln!(source, "{line} REM").unwrap();
         }
-        source.push_str("257 REM extra\nPRINT 7\n1 PRINT 42\n256\n257 REM replacement\nQUIT\n");
-        let (sys, output) = session_with_budget(&source, 20_000_000);
-        assert!(output.contains("? PROGRAM FULL\n"), "{output}");
-        assert_eq!(output.matches("? ").count(), 1, "{output}");
-        assert!(output.contains("> 7\n"), "{output}");
-        assert_eq!(sys.mem.get(0x1000), 1);
-        assert_eq!(sys.mem.get(0x1002), b'P');
-        assert_eq!(
-            u16::from_le_bytes([sys.mem.get(0x8F80), sys.mem.get(0x8F81)]),
-            257
-        );
+        source.push_str("1 PRINT 42\n256\nRUN\nQUIT\n");
+        let (sys, output) = session_with_budget(&source, 40_000_000);
+        assert!(!output.contains("? "), "{output}");
+        assert!(output.contains("> 42\n"), "{output}");
+        assert_eq!(sys.mem.get(0x1002), 1);
+        assert_eq!(sys.mem.get(0x1004), 0x90);
     }
 
     #[test]
     fn native_rejected_input_discards_the_rest_of_the_line() {
         for (line, message) in [
             (
-                format!("10 REM {}PRINT 99", "x".repeat(130)),
+                format!("10 REM {}PRINT 99", "x".repeat(0x8002)),
                 "LINE TOO LONG",
             ),
             ("10 REM \0PRINT 99".to_owned(), "INVALID CHARACTER"),
         ] {
-            let (_, output) = session(&format!("{line}\nPRINT 7\nQUIT\n"));
+            let (_, output) = session_with_budget(&format!("{line}\nPRINT 7\nQUIT\n"), 30_000_000);
             assert!(output.contains(&format!("? {message}\n")), "{output}");
             assert_eq!(output.matches("? ").count(), 1, "{output}");
             assert!(output.contains("> 7\n"), "{output}");
-            let (_, eof_output) = session(&line);
+            let (_, eof_output) = session_with_budget(&line, 30_000_000);
             assert!(
                 eof_output.contains(&format!("? {message}\n")),
                 "{eof_output}"
@@ -817,7 +885,13 @@ mod tests {
         assert!(loaded.contains("> 0\n"), "{loaded}");
         assert_eq!(loaded.matches("> 0\n").count(), 2, "{loaded}");
         assert!(!loaded.contains("ARRAY MEMORY FULL"), "{loaded}");
-        for malformed in ["10 PRINT 8\nnot numbered", "0 END", "65536 END", "10 \0"] {
+        for malformed in [
+            "10 PRINT 8\nnot numbered",
+            "0 END",
+            "65536 END",
+            "10 \0",
+            "10 PRINT \"unterminated",
+        ] {
             std::fs::write(&path, malformed).unwrap();
             let (sys, failure_output) = session(&format!(
                 "10 PRINT 7\n100 DATA 5,6\nREAD D\nA=42\nDIM B(0)\nB(0)=99\nA$=\"kept\"\nLOAD \"{filename}\"\nREAD D\nPRINT D\nPRINT A\nPRINT B(0)\nPRINT A$\nRUN\nQUIT\n"
@@ -831,19 +905,22 @@ mod tests {
                     && failure_output.contains("> 7\n"),
                 "{failure_output}"
             );
-            assert_eq!(sys.mem.get(0x1002), b'P');
+            assert_eq!(sys.mem.get(0x1004), 0x90);
         }
         let mut too_many_lines = String::new();
-        for line in 1..=257_u16 {
+        for line in 1..=200_u16 {
             use core::fmt::Write as _;
-            writeln!(too_many_lines, "{line} REM").unwrap();
+            writeln!(too_many_lines, "{line} REM {}", "x".repeat(200)).unwrap();
         }
         for (invalid, expected) in [
-            (format!("10 REM {}", "x".repeat(200)), "LINE TOO LONG"),
+            (format!("10 REM {}", "x".repeat(0x8002)), "LINE TOO LONG"),
             (too_many_lines, "PROGRAM FULL"),
         ] {
             std::fs::write(&path, invalid).unwrap();
-            let (_, rejected) = session(&format!("10 PRINT 7\nLOAD \"{filename}\"\nRUN\nQUIT\n"));
+            let (_, rejected) = session_with_budget(
+                &format!("10 PRINT 7\nLOAD \"{filename}\"\nRUN\nQUIT\n"),
+                30_000_000,
+            );
             assert!(
                 rejected.contains(&format!("? {expected}\n")) && rejected.contains("> 7\n"),
                 "{rejected}"
@@ -865,5 +942,51 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn tokenized_files_round_trip_with_more_than_256_lines() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("rx82-tokens-{}-{unique}.bas", std::process::id()));
+        let filename = path.display().to_string();
+        // Text interchange retains packed bytes, including string functions,
+        // and accepts a program larger than the former 256-record table.
+        let mut source = String::from("1 PRINT INSTR(\"ABCD\",MID$(\"ZBC\",2,2))\n");
+        for number in 2..=257_u16 {
+            use core::fmt::Write as _;
+            writeln!(source, "{number} REM").unwrap();
+        }
+        let mut reference = crate::basic::Basic::default();
+        reference.load(&source).unwrap();
+        reference
+            .interact(
+                &mut format!("SAVE \"{filename}\"\nQUIT\n").as_bytes(),
+                &mut Vec::new(),
+            )
+            .unwrap();
+        let (sys, output) = session_with_budget(
+            &format!("LOAD \"{filename}\"\nRUN\nSAVE \"{filename}\"\nQUIT\n"),
+            100_000_000,
+        );
+        assert!(!output.contains("? "), "{output}");
+        assert!(output.contains("> 2\n"), "{output}");
+        let image: Vec<_> = (0..reference.program_image().len())
+            .map(|offset| {
+                sys.mem
+                    .get(0x1000_u16.strict_add(u16::try_from(offset).unwrap()))
+            })
+            .collect();
+        assert_eq!(image, reference.program_image());
+        reference
+            .interact(
+                &mut format!("NEW\nLOAD \"{filename}\"\nQUIT\n").as_bytes(),
+                &mut Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(image, reference.program_image());
+        std::fs::remove_file(path).unwrap();
     }
 }

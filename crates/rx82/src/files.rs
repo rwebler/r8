@@ -27,7 +27,7 @@ impl FilePort {
                 self.bytes = if self.writing {
                     Vec::new()
                 } else {
-                    ensure!(fs::metadata(&path)?.len() <= 0x0001_0000, "file too large");
+                    ensure!(fs::metadata(&path)?.len() <= 0x0010_0000, "file too large");
                     fs::read(path)?
                 };
                 self.position = 0;
@@ -78,7 +78,7 @@ impl FilePort {
                     self.writing && self.status == 1,
                     "file not open for writing"
                 );
-                ensure!(self.bytes.len() < 0x0001_0000, "file too large");
+                ensure!(self.bytes.len() < 0x0010_0000, "file too large");
                 self.bytes.push(byte);
             }
             (0xFF13, false) => {
