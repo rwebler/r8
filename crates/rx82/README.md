@@ -495,21 +495,30 @@ keyword table in the ROM source also defines the host codec. ROM source is `sys/
 `cargo run -p rx82 -- asm crates/rx82/sys/basic_rom.asm`. Tests verify image/source
 agreement, ROM size, output, and guest RAM contents.
 
-Native multiplication uses `LSR` and conditional addition to process at most
-16 multiplier bits. Division aligns the divisor with at most 15 doublings,
-then uses `LSR` and conditional subtraction to process at most 16 quotient
-bits. Signed results, truncation toward zero, overflow checks, and division
-by zero errors are preserved. Tests cover signed boundary cases and compare
-R8 cycle counts with the former repeated-addition and repeated-subtraction
-routines. Run the isolated comparisons with:
+Native multiplication uses `LSR`, `SHL`, and conditional addition to process at
+most 16 multiplier bits. Division aligns the divisor with at most 15 `SHL`
+doublings, then uses `LSR` and conditional subtraction to process at most 16
+quotient bits. `SHL` also doubles variable and array offsets, advances the
+random remainder divisor, and builds decimal values; the decimal parser uses
+a two-bit shift only after its 6553 precheck. Signed results, truncation toward
+zero, overflow checks, and division by zero errors are preserved.
+
+The SHL changes reduced the BASIC ROM from 10,537 to 10,523 bytes. The isolated
+arithmetic harness measured 646 to 618 R8 cycles for `181 * 181`, 1,005 to
+945 for `-32768 * 1`, 1,639 to 1,519 for `30000 / 1`, and 1,483 to 1,379 for
+`30000 / 7`. These compare the same binary algorithms before and after SHL.
+Separate tests compare the current algorithms with the older repeated-addition
+and repeated-subtraction routines. Run both comparisons with:
 
 ```sh
 cargo test -p rx82 native_multiplication_cycle_regression -- --nocapture
 cargo test -p rx82 native_division_cycle_regression -- --nocapture
+cargo test -p rx82 native_shl_cycle_regression -- --nocapture
 ```
 
 These counts include the test harness and arithmetic helpers, but exclude
-BASIC parsing and printing.
+BASIC parsing and printing. The decimal parser is tested separately through
+`NUMBER_TEXT`, so tokenized literals cannot bypass its shift path.
 
 The native DATA cursor uses little-endian words at `00B4` (last scanned line)
 and `00BC` (next item's source address; zero means search the next line).

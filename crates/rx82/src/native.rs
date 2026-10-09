@@ -228,7 +228,7 @@ mod tests {
         ];
         for left in values {
             for right in values {
-                let (result, cycles) = divide_routine(left, right, false);
+                let (result, cycles) = divide_routine(left, right, false, false);
                 let expected = if right == 0 {
                     Err("division by zero")
                 } else {
@@ -243,8 +243,8 @@ mod tests {
     #[test]
     fn native_division_cycle_regression() {
         for (left, right) in [(30000, 1), (i16::MIN, 1), (30000, 7), (i16::MIN, -1)] {
-            let (old_result, old_cycles) = divide_routine(left, right, true);
-            let (new_result, new_cycles) = divide_routine(left, right, false);
+            let (old_result, old_cycles) = divide_routine(left, right, true, false);
+            let (new_result, new_cycles) = divide_routine(left, right, false, false);
             assert_eq!(new_result, old_result);
             assert!(
                 new_cycles.strict_mul(4) < old_cycles,
@@ -254,8 +254,76 @@ mod tests {
         }
     }
 
-    fn divide_routine(left: i16, right: i16, legacy: bool) -> (Result<i16, &'static str>, u32) {
-        use r8cpu::regs::Reg::{AB, CD, GH, SP};
+    #[test]
+    fn native_shl_cycle_regression() {
+        // Reconstruct the immediate pre-SHL routine from the live source so
+        // both measurements use the same harness, helpers, and operands.
+        for (left, right) in [(181, 181), (30000, 7), (i16::MIN, 1)] {
+            let (before, old_cycles) = multiply_routine(left, right, false, true);
+            let (after, new_cycles) = multiply_routine(left, right, false, false);
+            assert_eq!(after, before, "{left} * {right}");
+            assert!(new_cycles < old_cycles, "{left} * {right}");
+            println!("{left} * {right}: {old_cycles} -> {new_cycles} R8 cycles");
+        }
+        for (left, right) in [(30000, 1), (30000, 7), (i16::MIN, -1)] {
+            let (before, old_cycles) = divide_routine(left, right, false, true);
+            let (after, new_cycles) = divide_routine(left, right, false, false);
+            assert_eq!(after, before, "{left} / {right}");
+            assert!(new_cycles < old_cycles, "{left} / {right}");
+            println!("{left} / {right}: {old_cycles} -> {new_cycles} R8 cycles");
+        }
+    }
+
+    #[test]
+    fn native_decimal_text_preserves_unsigned_bounds() {
+        use r8cpu::regs::Reg::{AB, CD, EF, SP};
+        let (_, source) = include_str!("../sys/basic_rom.asm")
+            .split_once("NUMBER_TEXT:\n")
+            .unwrap();
+        let (parser, _) = source.split_once("PRINT_NUM:\n").unwrap();
+        for (input, expected) in [
+            ("0", Some(0)),
+            ("32767", Some(0x7FFF)),
+            ("32768", Some(0x8000)),
+            ("65535", Some(0xFFFF)),
+            ("65536", None),
+        ] {
+            let code = r8asm::assemble(&format!(
+                "ld sp, 0xBFFF\nld gh, INPUT\nld cd, 0x1357\nld ef, 0x2468\ncall NUMBER_TEXT\nhalt\nPEEK:\nld a, (gh)\nret\nNUMBER_TEXT:\n{parser}\nOVERFLOW:\nld cd, 0xFFFF\nhalt\nINPUT:\ndata \"{input}x\", 0x00\n"
+            ))
+            .unwrap();
+            let mut sys = System {
+                turbo: true,
+                ..System::default()
+            };
+            sys.mem.load(0x0100, &code).unwrap();
+            sys.cpu.pc = 0x0100;
+            for _ in 0_u32..2_000 {
+                if sys.cpu.halt {
+                    break;
+                }
+                sys.tick();
+            }
+            assert!(sys.cpu.halt, "{input} timed out");
+            assert_eq!(
+                (sys.cpu.regs.get16(CD) != 0xFFFF).then(|| sys.cpu.regs.get16(AB)),
+                expected,
+                "{input}"
+            );
+            if expected.is_some() {
+                assert_eq!(sys.cpu.regs.get16(CD), 0x1357, "{input}");
+                assert_eq!(sys.cpu.regs.get16(EF), 0x2468, "{input}");
+                assert_eq!(sys.cpu.regs.get16(SP), 0xBFFF, "{input}");
+            }
+        }
+    }
+
+    fn divide_routine(
+        left: i16,
+        right: i16,
+        legacy: bool,
+        pre_shl: bool,
+    ) -> (Result<i16, &'static str>, u32) {
         let (_, arithmetic) = include_str!("../sys/basic_rom.asm")
             .split_once("NEGATE:\n")
             .unwrap();
@@ -265,9 +333,29 @@ mod tests {
         // Preserve the old algorithm as an isolated cycle-count baseline.
         let division = if legacy {
             "    push cd\n    cmp ef, 0x0000\n    bne LEGACY_DIVIDE\n    jmp DIV_ZERO\nLEGACY_DIVIDE:\n    call MAGNITUDES\n    ld cd, 0x0000\nDIV_LOOP:\n    cmp ab, ef\n    bcs LEGACY_SUBTRACT\n    jmp DIV_DONE\nLEGACY_SUBTRACT:\n    sec\n    sub ab, ef\n    inc cd\n    jmp DIV_LOOP\nDIV_DONE:\n    ld ab, cd\n    call MAG_RESULT\n    pop cd\n    ret\n"
+        } else if pre_shl {
+            return divide_assembled(
+                left,
+                right,
+                helpers,
+                &division.replace(
+                    "    shl ef, 0x01\n    shl gh, 0x01\n",
+                    "    clc\n    add ef, ef\n    clc\n    add gh, gh\n",
+                ),
+            );
         } else {
             division
         };
+        divide_assembled(left, right, helpers, division)
+    }
+
+    fn divide_assembled(
+        left: i16,
+        right: i16,
+        helpers: &str,
+        division: &str,
+    ) -> (Result<i16, &'static str>, u32) {
+        use r8cpu::regs::Reg::{AB, CD, GH, SP};
         let code = r8asm::assemble(&format!(
             "ld sp, 0xBFFF\nld ab, 0x{:04X}\nld ef, 0x{:04X}\nld cd, 0x1357\nld gh, 0x2468\ncall DIV_SIGNED\nhalt\nNEGATE:\n{helpers}\nDIV_SIGNED:\n{division}\nOVERFLOW:\nld gh, 0xFFFF\nhalt\nDIV_ZERO:\nld gh, 0xFFFE\nhalt",
             u16::from_le_bytes(left.to_le_bytes()), u16::from_le_bytes(right.to_le_bytes())
@@ -325,7 +413,7 @@ mod tests {
         ];
         for left in values {
             for right in values {
-                let (result, cycles) = multiply_routine(left, right, false);
+                let (result, cycles) = multiply_routine(left, right, false, false);
                 assert_eq!(result, left.checked_mul(right), "{left} * {right}");
                 assert!(cycles < 2500, "{left} * {right} took {cycles} cycles");
             }
@@ -335,8 +423,8 @@ mod tests {
     #[test]
     fn native_multiplication_cycle_regression() {
         for (left, right) in [(30000, 1), (i16::MIN, 1), (30000, 0), (181, 181)] {
-            let (old_result, old_cycles) = multiply_routine(left, right, true);
-            let (new_result, new_cycles) = multiply_routine(left, right, false);
+            let (old_result, old_cycles) = multiply_routine(left, right, true, false);
+            let (new_result, new_cycles) = multiply_routine(left, right, false, false);
             assert_eq!(new_result, old_result);
             assert!(
                 new_cycles.strict_mul(4) < old_cycles,
@@ -348,7 +436,7 @@ mod tests {
 
     // Run the real arithmetic routine in isolation, including its sign and
     // overflow helpers. The legacy body is a benchmark fixture, not guest code.
-    fn multiply_routine(left: i16, right: i16, legacy: bool) -> (Option<i16>, u32) {
+    fn multiply_routine(left: i16, right: i16, legacy: bool, pre_shl: bool) -> (Option<i16>, u32) {
         use r8cpu::regs::Reg::{AB, CD, GH, SP};
         let (_, arithmetic) = include_str!("../sys/basic_rom.asm")
             .split_once("NEGATE:\n")
@@ -358,6 +446,11 @@ mod tests {
             let (helpers, _) = arithmetic.split_once("MUL_SIGNED:\n").unwrap();
             format!(
                 "{helpers}MUL_SIGNED:\n    push cd\n    call MAGNITUDES\n    ld cd, 0x0000\nMUL_LOOP:\n    cmp ab, 0x0000\n    bne LEGACY_ADD\n    jmp MUL_DONE\nLEGACY_ADD:\n    clc\n    add cd, ef\n    bcc LEGACY_NEXT\n    jmp OVERFLOW\nLEGACY_NEXT:\n    dec ab\n    jmp MUL_LOOP\nMUL_DONE:\n    ld ab, cd\n    call MAG_RESULT\n    pop cd\n    ret\n"
+            )
+        } else if pre_shl {
+            arithmetic.replace(
+                "    shl ef, 0x01\n    bcc MUL_LOOP\n",
+                "    clc\n    add ef, ef\n    bcc MUL_LOOP\n",
             )
         } else {
             arithmetic.to_owned()

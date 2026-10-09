@@ -881,8 +881,7 @@ MUL_SHIFT:
     ; Do not double after the last bit: -32768 * 1 must remain valid.
     cmp ab, 0x0000
     beq MUL_DONE
-    clc
-    add ef, ef
+    shl ef, 0x01
     bcc MUL_LOOP
     ; Remaining multiplier bits make an overflowing shift a real overflow.
     jmp OVERFLOW
@@ -907,10 +906,8 @@ DIV_ALIGN:
     ; Magnitudes are at most 8000. Doubling a smaller divisor cannot wrap.
     cmp ef, ab
     bcs DIV_LOOP
-    clc
-    add ef, ef
-    clc
-    add gh, gh
+    shl ef, 0x01
+    shl gh, 0x01
     jmp DIV_ALIGN
 DIV_LOOP:
     cmp ab, ef
@@ -953,8 +950,7 @@ LONG_611:
 LONG_613:
     sec
     sub a, 0x41
-    clc
-    add a, a
+    shl a, 0x01
     ld d, a
     ld c, 0x03
     inc gh
@@ -1004,14 +1000,11 @@ LONG_639:
 LONG_641:
 NUMBER_ACCUMULATE:
     ld cd, ef
-    clc
-    add ef, ef
-    clc
-    add ef, ef
+    ; The precheck limits x to 6553, so 4*x fits without lost bits.
+    shl ef, 0x02
     clc
     add ef, cd
-    clc
-    add ef, ef
+    shl ef, 0x01
     bcc LONG_652
     jmp OVERFLOW
 LONG_652:
@@ -2410,8 +2403,7 @@ ARRAY_DESCRIPTOR:
     ld ab, cd
     sec
     sub ab, 0x0300
-    clc
-    add ab, ab
+    shl ab, 0x01
     clc
     add ab, 0x0800
     ld cd, ab
@@ -2466,8 +2458,7 @@ LOCATION_NONNEGATIVE:
     jmp BAD_SUBSCRIPT
 LOCATION_IN_RANGE:
     pop ef
-    clc
-    add ab, ab
+    shl ab, 0x01
     clc
     add ef, ab
     ld cd, ef
@@ -2521,8 +2512,7 @@ DIM_SIZE_OK:
     push gh
     push ab
     inc ab
-    clc
-    add ab, ab
+    shl ab, 0x01
     ld gh, 0x00B0
     ld f, (gh)
     ld e, (gh+0x01)
@@ -3241,8 +3231,7 @@ POOL_REWRITE_ARRAY:
     ld b, (cd+0x02)
     ld a, (cd+0x03)
     inc ab
-    clc
-    add ab, ab
+    shl ab, 0x01
     clc
     add ef, ab
     pop cd
@@ -3817,8 +3806,7 @@ RANDOM_REMAINDER:
 RANDOM_REMAINDER_ALIGN:
     cmp ef, ab
     bcs RANDOM_REMAINDER_SUBTRACT
-    clc
-    add ef, ef
+    shl ef, 0x01
     jmp RANDOM_REMAINDER_ALIGN
 RANDOM_REMAINDER_SUBTRACT:
     cmp ab, ef
