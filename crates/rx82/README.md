@@ -87,6 +87,44 @@ filenames are preserved. Relative paths use the process's current directory.
 These commands are available at the prompt only. An empty file loads an empty
 program; saving an empty program writes an empty file.
 
+`BSAVE "file.bin",address,length` writes exactly `length` memory bytes to a
+raw file. `BLOAD "file.bin",address` reads the entire raw file at `address`.
+Both commands work at the prompt and in numbered programs, including after
+`IF ... THEN`. The file has no header or stored address. An existing BSAVE
+output is replaced. Filenames must be nonempty quoted literals of at most 240
+bytes; case and spaces are preserved, and relative paths use the host working
+directory.
+
+Binary transfers must fit wholly in `0000`–`BFFF` or `EF00`–`FEFF` (hex).
+ROM, devices, gaps, and ranges crossing a boundary are rejected. A zero-length
+BSAVE creates an empty file; BLOAD of an empty file changes no destination
+bytes. Both still require an address inside one of the allowed regions. Bare
+unsigned address and length literals can reach 65535. Computed addresses use
+the bit pattern of checked signed 16-bit expressions, as with `PEEK` and
+`POKE`; computed lengths must be nonnegative. Negative lengths and arithmetic
+overflow are errors. Parsing and range checks finish before BSAVE creates or
+replaces output. BLOAD checks the full file size before copying, so a failed
+open or validation leaves destination payload bytes unchanged. Neither command
+resets the program, variables, arrays, strings, DATA position, or control flow.
+
+For example, the following commands preserve two bytes while changing RAM:
+
+```basic
+POKE 256,0
+POKE 257,255
+BSAVE "sample.bin",256,2
+POKE 256,42
+BLOAD "sample.bin",256
+PRINT PEEK(256),PEEK(257)
+```
+
+Use `0100`–`01FF` hex for small transfers while BASIC is running. Native
+transfers access live RAM, including interpreter variables, program records,
+string storage, scratch, and the stack; loading over these can disrupt BASIC.
+The Rust reference interpreter has separate byte memory: BLOAD changes bytes
+seen by `PEEK`, but it does not rebuild native variables, strings, or program
+records. Both implementations can exchange files in a shared safe RAM range.
+
 The initial dialect supports:
 
 - `DIM A(100)` allocates 101 signed 16-bit elements, indexed 0 through 100.

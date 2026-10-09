@@ -28,6 +28,7 @@ pub(super) fn keywords() -> impl Iterator<Item = (u8, &'static str)> {
         .copied()
 }
 
+#[expect(clippy::cognitive_complexity, reason = "single-pass BASIC tokenizer")]
 pub(super) fn encode(source: &str) -> Result<Vec<u8>> {
     let bytes = source.as_bytes();
     let mut out = Vec::new();
@@ -35,6 +36,8 @@ pub(super) fn encode(source: &str) -> Result<Vec<u8>> {
     let mut reference = false;
     let mut unary = true;
     let mut address = false;
+    let mut binary_state = 0_u8;
+    let mut binary_depth = 0_u8;
     while let Some(&byte) = bytes.get(pos) {
         let negative_digit = if byte == b'-' && unary {
             bytes[pos.strict_add(1)..]
@@ -63,6 +66,9 @@ pub(super) fn encode(source: &str) -> Result<Vec<u8>> {
             reference = false;
             unary = false;
             address = false;
+            if binary_state == 1 {
+                binary_state = 2;
+            }
         } else if byte.is_ascii_alphabetic() {
             let start = pos;
             while bytes.get(pos).is_some_and(u8::is_ascii_alphanumeric) {
@@ -90,6 +96,10 @@ pub(super) fn encode(source: &str) -> Result<Vec<u8>> {
                 reference = matches!(code, 0x88 | 0x8b | 0x8c | 0x97);
                 unary = true;
                 address = matches!(code, 0x9b | 0x9c);
+                if matches!(code, 0xa7 | 0xa8) {
+                    binary_state = 1;
+                    binary_depth = 0;
+                }
             } else {
                 out.extend(word.bytes());
                 reference = false;
@@ -116,7 +126,7 @@ pub(super) fn encode(source: &str) -> Result<Vec<u8>> {
                 if negative {
                     value <= 0x8000
                 } else {
-                    reference || address || value <= 0x7FFF
+                    reference || address || binary_state >= 3 || value <= 0x7FFF
                 },
                 "integer out of range"
             );
@@ -125,7 +135,11 @@ pub(super) fn encode(source: &str) -> Result<Vec<u8>> {
             } else {
                 value
             };
-            out.push(if reference && !negative { 0xb2 } else { 0xb0 });
+            out.push(if (reference || binary_state >= 3) && !negative {
+                0xb2
+            } else {
+                0xb0
+            });
             out.extend(value.to_le_bytes());
             reference = false;
             unary = false;
@@ -148,6 +162,14 @@ pub(super) fn encode(source: &str) -> Result<Vec<u8>> {
                 );
                 out.push(if byte == b'?' { 0x90 } else { byte });
                 pos = pos.strict_add(1);
+            }
+            if binary_state >= 2 {
+                match byte {
+                    b'(' => binary_depth = binary_depth.saturating_add(1),
+                    b')' => binary_depth = binary_depth.saturating_sub(1),
+                    b',' if binary_depth == 0 => binary_state = binary_state.saturating_add(1),
+                    _ => {}
+                }
             }
             reference = false;
             unary = byte != b')';
@@ -192,7 +214,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Vec<Token>> {
             0xb3..=0xb5 => {
                 out.push(Token::Comparison(byte));
             }
-            0x80..=0xa6 => {
+            0x80..=0xa8 => {
                 let (_, word) = keywords()
                     .find(|&(code, _)| code == byte)
                     .context("invalid token")?;
@@ -267,7 +289,7 @@ pub(super) fn text(bytes: &[u8]) -> Result<String> {
                 0xb4 => "<=",
                 _ => ">=",
             }),
-            0x80..=0xa6 => {
+            0x80..=0xa8 => {
                 let (_, word) = keywords()
                     .find(|&(code, _)| code == byte)
                     .context("invalid token")?;
@@ -283,7 +305,9 @@ pub(super) fn text(bytes: &[u8]) -> Result<String> {
                     out.push_str(core::str::from_utf8(&bytes[pos..pos.strict_add(end)])?);
                     break;
                 }
-                if bytes.get(pos) != Some(&0) && (byte < 0x9a || matches!(byte, 0x9c | 0x9e)) {
+                if bytes.get(pos) != Some(&0)
+                    && (byte < 0x9a || matches!(byte, 0x9c | 0x9e | 0xa7 | 0xa8))
+                {
                     out.push(' ');
                 }
             }
