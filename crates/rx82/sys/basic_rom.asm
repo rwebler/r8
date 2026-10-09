@@ -90,6 +90,16 @@ DISPATCH_AFTER_POKE:
     bne DISPATCH_AFTER_RANDOMIZE
     jmp RANDOMIZE
 DISPATCH_AFTER_RANDOMIZE:
+    ld cd, KW_BSAVE
+    call MATCH
+    bne DISPATCH_BLOAD
+    jmp BSAVE
+DISPATCH_BLOAD:
+    ld cd, KW_BLOAD
+    call MATCH
+    bne DISPATCH_TEXT_SAVE
+    jmp BLOAD
+DISPATCH_TEXT_SAVE:
     ld cd, KW_SAVE
     call MATCH
     bne LONG_53
@@ -2016,17 +2026,25 @@ LONG_1425:
     ret
 FILENAME:
     call REQUIRE_DIRECT
+    call FILENAME_LITERAL
+    call EOL
+    ret
+FILENAME_LITERAL:
     call SPACE
     cmp a, 0xB1
     bne FILENAME_TEXT
     inc gh
     ld b, (gh)
     inc gh
+    cmp b, 0x00
+    bne FILENAME_TOKEN_VALID
+    jmp EXPECTED_FILENAME
+FILENAME_TOKEN_VALID:
     ld a, 0x00
     ld 0xFF14, a
 FILENAME_TOKEN_BYTE:
     cmp b, 0x00
-    beq FILENAME_END
+    beq FILENAME_VALID
     ld a, (gh)
     ld 0xFF12, a
     call FILE_CHECK
@@ -2039,6 +2057,7 @@ FILENAME_TEXT:
     jmp EXPECTED_FILENAME
 LONG_1431:
     inc gh
+    ld b, 0x00
     ld a, 0x00
     ld 0xFF14, a
 FILENAME_CHAR:
@@ -2052,11 +2071,15 @@ LONG_1439:
     bne LONG_1441
     jmp FILENAME_END
 LONG_1441:
+    inc b
     ld 0xFF12, a
     call FILE_CHECK
     jmp FILENAME_CHAR
 FILENAME_END:
-    call EOL
+    cmp b, 0x00
+    bne FILENAME_VALID
+    jmp EXPECTED_FILENAME
+FILENAME_VALID:
     ret
 FILE_CHECK:
     push ab
@@ -2071,6 +2094,233 @@ LONG_1455:
     pop cd
     pop ab
     ret
+; Binary transfers use 00D5/6 for the current address, 00D7/8 for
+; remaining/count, and 00D9 for the exclusive region-end high byte.
+; These bytes are lexical scratch after a line has been tokenized.
+BINARY_ARGS:
+    call FILENAME_LITERAL
+    call BINARY_COMMA
+    call MEM_ADDRESS
+    ld 0x00D5, b
+    ld 0x00D6, a
+    cmp ab, 0xC000
+    bcc BINARY_MAIN_RAM
+    cmp ab, 0xEF00
+    bcc BINARY_BAD_RANGE
+    cmp ab, 0xFF00
+    bcs BINARY_BAD_RANGE
+    ld a, 0xFF
+    ld 0x00D9, a
+    ret
+BINARY_MAIN_RAM:
+    ld a, 0xC0
+    ld 0x00D9, a
+    ret
+BINARY_COMMA:
+    call SPACE
+    cmp a, 0x2C
+    beq BINARY_COMMA_OK
+    jmp EXPECTED_COMMA
+BINARY_COMMA_OK:
+    inc gh
+    ret
+BINARY_BAD_RANGE:
+    ld cd, BINARY_RANGE_TEXT
+    jmp REPORT_ERROR
+BINARY_RANGE_TEXT:
+    data "? BINARY RANGE OUTSIDE RAM", 0x00
+BINARY_BAD_LENGTH:
+    ld cd, BINARY_LENGTH_TEXT
+    jmp REPORT_ERROR
+BINARY_LENGTH_TEXT:
+    data "? INVALID BINARY LENGTH", 0x00
+; The address parser accepts unsigned literals; length accepts the same
+; syntax only when the literal is the complete remaining argument.
+BINARY_LENGTH:
+    call SPACE
+    push gh
+    cmp a, 0xB0
+    beq BINARY_LENGTH_LITERAL
+    cmp a, 0xB2
+    beq BINARY_LENGTH_LITERAL
+    cmp a, 0x30
+    bcc BINARY_LENGTH_EXPR
+    cmp a, 0x3A
+    bcs BINARY_LENGTH_EXPR
+BINARY_LENGTH_LITERAL:
+    ld 0x00A9, a
+    call NUMBER
+    ld cd, 0x00A9
+    ld c, (cd)
+    cmp c, 0xB0
+    bne BINARY_LENGTH_LITERAL_OK
+    cmp a, 0x80
+    bcc BINARY_LENGTH_LITERAL_OK
+    jmp BINARY_BAD_LENGTH
+BINARY_LENGTH_LITERAL_OK:
+    push ab
+    call SPACE
+    ld c, a
+    pop ab
+    cmp c, 0x00
+    beq BINARY_LENGTH_DONE
+BINARY_LENGTH_EXPR:
+    pop gh
+    call EXPR
+    cmp a, 0x80
+    bcc BINARY_LENGTH_OK
+    jmp BINARY_BAD_LENGTH
+BINARY_LENGTH_OK:
+    ret
+BINARY_LENGTH_DONE:
+    pop cd
+    ret
+BSAVE:
+    call BINARY_ARGS
+    call BINARY_COMMA
+    call BINARY_LENGTH
+    ld 0x00D7, b
+    ld 0x00D8, a
+    call EOL
+    ld cd, 0x00D5
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld cd, 0x00D7
+    ld f, (cd)
+    ld e, (cd+0x01)
+    clc
+    add ab, ef
+    bcc BSAVE_NO_WRAP
+    jmp BINARY_BAD_RANGE
+BSAVE_NO_WRAP:
+    ld cd, 0x00D9
+    ld c, (cd)
+    cmp c, 0xC0
+    beq BSAVE_MAIN_CHECK
+    cmp ab, 0xFF00
+    jmp BSAVE_RANGE_RESULT
+BSAVE_MAIN_CHECK:
+    cmp ab, 0xC000
+BSAVE_RANGE_RESULT:
+    bcc BSAVE_OPEN
+    beq BSAVE_OPEN
+    jmp BINARY_BAD_RANGE
+BSAVE_OPEN:
+    push gh
+    ld a, 0x02
+    ld 0xFF10, a
+    call FILE_CHECK
+BSAVE_BYTE:
+    ld cd, 0x00D7
+    ld b, (cd)
+    ld a, (cd+0x01)
+    cmp ab, 0x0000
+    bne BSAVE_BYTE_MORE
+    jmp BINARY_CLOSE
+BSAVE_BYTE_MORE:
+    dec ab
+    ld (cd), b
+    ld (cd+0x01), a
+    ld cd, 0x00D5
+    ld h, (cd)
+    ld g, (cd+0x01)
+    ld a, (gh)
+    ld 0xFF13, a
+    call FILE_CHECK
+    inc gh
+    ld (cd), h
+    ld (cd+0x01), g
+    jmp BSAVE_BYTE
+BINARY_CLOSE:
+    ld a, 0x03
+    ld 0xFF10, a
+    call FILE_CHECK
+    pop gh
+    ret
+BLOAD:
+    call BINARY_ARGS
+    call EOL
+    push gh
+    ld a, 0x01
+    ld 0xFF10, a
+    call FILE_CHECK
+    ld a, 0x00
+    ld 0x00D7, a
+    ld 0x00D8, a
+BLOAD_SCAN:
+    call FILE_CHECK
+    ld cd, 0xFF11
+    ld a, (cd)
+    and a, 0x02
+    cmp a, 0x00
+    beq BLOAD_SCAN_MORE
+    jmp BLOAD_REWIND
+BLOAD_SCAN_MORE:
+    ld cd, 0x00D5
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld cd, 0x00D9
+    ld c, (cd)
+    cmp c, 0xC0
+    beq BLOAD_SCAN_MAIN_CHECK
+    cmp ab, 0xFF00
+    jmp BLOAD_SCAN_RANGE_RESULT
+BLOAD_SCAN_MAIN_CHECK:
+    cmp ab, 0xC000
+BLOAD_SCAN_RANGE_RESULT:
+    bcc BLOAD_SCAN_FITS
+    jmp BINARY_BAD_RANGE
+BLOAD_SCAN_FITS:
+    inc ab
+    ld 0x00D5, b
+    ld 0x00D6, a
+    ld cd, 0x00D7
+    ld b, (cd)
+    ld a, (cd+0x01)
+    inc ab
+    ld (cd), b
+    ld (cd+0x01), a
+    ld cd, 0xFF13
+    ld a, (cd)
+    call FILE_CHECK
+    jmp BLOAD_SCAN
+BLOAD_REWIND:
+    ld a, 0x05
+    ld 0xFF10, a
+    call FILE_CHECK
+    ; Recompute the first address from the final pointer and byte count.
+    ld cd, 0x00D5
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld cd, 0x00D7
+    ld f, (cd)
+    ld e, (cd+0x01)
+    sec
+    sub ab, ef
+    ld 0x00D5, b
+    ld 0x00D6, a
+BLOAD_BYTE:
+    ld cd, 0x00D7
+    ld b, (cd)
+    ld a, (cd+0x01)
+    cmp ab, 0x0000
+    bne BLOAD_BYTE_MORE
+    jmp BINARY_CLOSE
+BLOAD_BYTE_MORE:
+    dec ab
+    ld (cd), b
+    ld (cd+0x01), a
+    ld cd, 0xFF13
+    ld a, (cd)
+    call FILE_CHECK
+    ld cd, 0x00D5
+    ld h, (cd)
+    ld g, (cd+0x01)
+    ld (gh), a
+    inc gh
+    ld (cd), h
+    ld (cd+0x01), g
+    jmp BLOAD_BYTE
 SAVE:
     call FILENAME
     ld a, 0x02
@@ -2207,6 +2457,8 @@ HELP:
     jmp PUTS
 HELP_TEXT:
     data "RX-82 native ROM: numbered lines; LIST RUN NEW SAVE LOAD QUIT", 0x0A
+    data "BSAVE file,address,length; BLOAD file,address (quoted raw files)", 0x0A
+    data "Binary ranges: 0000-BFFF or EF00-FEFF; zero length allowed", 0x0A
     data "LET PRINT INPUT IF THEN GOTO GOSUB RETURN FOR TO STEP NEXT END", 0x0A
     data "A-Z variables, signed 16-bit integers, + - * / and parentheses", 0x0A
     data "DIM A(100): indices 0..100; 2048 array elements total", 0x0A
@@ -3650,6 +3902,8 @@ MEM_ADDRESS:
     push gh
     cmp a, 0xB0
     beq MEM_ADDRESS_LITERAL
+    cmp a, 0xB2
+    beq MEM_ADDRESS_LITERAL
     cmp a, 0x30
     bcs MEM_ADDRESS_DIGIT
     jmp MEM_ADDRESS_EXPR
@@ -3666,6 +3920,8 @@ MEM_ADDRESS_LITERAL:
     cmp c, 0x2C
     beq MEM_ADDRESS_DONE
     cmp c, 0x29
+    beq MEM_ADDRESS_DONE
+    cmp c, 0x00
     beq MEM_ADDRESS_DONE
 MEM_ADDRESS_EXPR:
     pop gh
@@ -4124,6 +4380,10 @@ KW_SAVE:
     data 0x93, "SAVE", 0x00
 KW_LOAD:
     data 0x94, "LOAD", 0x00
+KW_BLOAD:
+    data 0xA7, "BLOAD", 0x00
+KW_BSAVE:
+    data 0xA8, "BSAVE", 0x00
 KW_QUIT:
     data 0x95, "QUIT", 0x00
 KW_HELP:
@@ -4206,6 +4466,17 @@ TOKEN_MATCHED:
     ld 0x00D3, a
     ld a, (cd)
     ld 0x00D4, a
+    cmp a, 0xA7
+    beq TOKEN_BINARY_KEYWORD
+    cmp a, 0xA8
+    bne TOKEN_KEYWORD_EMIT
+TOKEN_BINARY_KEYWORD:
+    ld a, 0x01
+    ld 0x00D5, a
+    ld a, 0x00
+    ld 0x00D6, a
+    ld a, (cd)
+TOKEN_KEYWORD_EMIT:
     call TOKEN_EMIT
     ld 0x00D2, a
     cmp a, 0x83
@@ -4222,7 +4493,9 @@ TOKEN_RAW:
     ret
 TOKEN_WORD:
     call WORD_CHAR
-    beq TOKEN_NEXT
+    bne TOKEN_WORD_MORE
+    jmp TOKEN_NEXT
+TOKEN_WORD_MORE:
     call TOKEN_EMIT
     inc gh
     ld a, 0x00
@@ -4301,6 +4574,39 @@ TOKEN_CHECK_SYMBOL:
     inc cd
     jmp TOKEN_VALID_SYMBOL
 TOKEN_SYMBOL_EMIT:
+    push ab
+    ld cd, 0x00D5
+    ld b, (cd)
+    cmp b, 0x02
+    bcc TOKEN_BINARY_SYMBOL_DONE
+    cmp a, 0x28
+    bne TOKEN_BINARY_CLOSE
+    ld cd, 0x00D6
+    ld b, (cd)
+    inc b
+    ld (cd), b
+    jmp TOKEN_BINARY_SYMBOL_DONE
+TOKEN_BINARY_CLOSE:
+    cmp a, 0x29
+    bne TOKEN_BINARY_COMMA
+    ld cd, 0x00D6
+    ld b, (cd)
+    dec b
+    ld (cd), b
+    jmp TOKEN_BINARY_SYMBOL_DONE
+TOKEN_BINARY_COMMA:
+    cmp a, 0x2C
+    bne TOKEN_BINARY_SYMBOL_DONE
+    ld cd, 0x00D6
+    ld b, (cd)
+    cmp b, 0x00
+    bne TOKEN_BINARY_SYMBOL_DONE
+    ld cd, 0x00D5
+    ld b, (cd)
+    inc b
+    ld (cd), b
+TOKEN_BINARY_SYMBOL_DONE:
+    pop ab
     ld b, 0x01
     cmp a, 0x29
     bne TOKEN_SYMBOL_UNARY
@@ -4333,8 +4639,19 @@ TOKEN_NUMBER:
     beq TOKEN_NUMBER_RANGE_OK
     cmp a, 0x9C
     beq TOKEN_NUMBER_RANGE_OK
+    ld cd, 0x00D5
+    ld a, (cd)
+    cmp a, 0x03
+    bcs TOKEN_NUMBER_RANGE_OK
     jmp OVERFLOW
 TOKEN_NUMBER_RANGE_OK:
+    ld cd, 0x00D5
+    ld a, (cd)
+    cmp a, 0x03
+    bcc TOKEN_NUMBER_STANDARD
+    ld a, 0xB2
+    jmp TOKEN_NUMBER_TAG
+TOKEN_NUMBER_STANDARD:
     ld cd, 0x00D2
     ld a, (cd)
     cmp a, 0x88
@@ -4425,6 +4742,13 @@ TOKEN_STRING_LENGTH_DONE:
     pop ab
 TOKEN_STRING_LENGTH_END:
     pop gh
+    ld cd, 0x00D5
+    ld a, (cd)
+    cmp a, 0x01
+    bne TOKEN_STRING_CONTEXT_DONE
+    ld a, 0x02
+    ld (cd), a
+TOKEN_STRING_CONTEXT_DONE:
     ld a, 0x00
     ld 0x00D2, a
     ld 0x00D3, a
@@ -4661,6 +4985,10 @@ DETOKEN_FOUND:
     beq DETOKEN_KEYWORD_SPACE
     cmp b, 0x9E
     beq DETOKEN_KEYWORD_SPACE
+    cmp b, 0xA7
+    beq DETOKEN_KEYWORD_SPACE
+    cmp b, 0xA8
+    beq DETOKEN_KEYWORD_SPACE
     cmp b, 0x9A
     bcc TOKEN_LONG_0_0
     jmp DETOKENIZE
@@ -4688,6 +5016,8 @@ READ_TOKEN_LINE:
     ld 0x00ED, a
     ld 0x00D2, a
     ld 0x00D4, a
+    ld 0x00D5, a
+    ld 0x00D6, a
     ld 0x00D9, a
     ld a, 0x01
     ld 0x00EE, a

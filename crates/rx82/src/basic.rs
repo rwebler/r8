@@ -9,7 +9,16 @@ use anyhow::{Context as _, Result, bail, ensure};
 use core::cell::RefCell;
 #[path = "basic_tokens.rs"]
 mod tokens;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read as _, Write};
+
+#[expect(clippy::single_call_fn, reason = "keep RAM region policy explicit")]
+fn binary_capacity(address: u16) -> Result<usize> {
+    match address {
+        0x0000..=0xBFFF => Ok(0xC000_usize.saturating_sub(usize::from(address))),
+        0xEF00..=0xFEFF => Ok(0xFF00_usize.saturating_sub(usize::from(address))),
+        _ => bail!("binary transfer address outside RAM"),
+    }
+}
 
 /// BASIC program storage, signed 16-bit integers, arrays, and ASCII strings.
 pub struct Basic {
@@ -437,17 +446,32 @@ impl Parser<'_> {
         if let Some(Token::Number(number)) = self.tokens.get(self.pos).cloned()
             && matches!(
                 self.tokens.get(self.pos.saturating_add(1)),
-                Some(Token::Symbol(',' | ')'))
+                Some(Token::Symbol(',' | ')')) | None
             )
         {
             self.pos = self.pos.saturating_add(1);
-            return Ok(u16::from_le_bytes(
-                i16::try_from(number)
-                    .context("integer overflow")?
-                    .to_le_bytes(),
-            ));
+            return u16::try_from(number).or_else(|_| {
+                Ok::<_, anyhow::Error>(u16::from_le_bytes(
+                    i16::try_from(number)
+                        .context("integer overflow")?
+                        .to_le_bytes(),
+                ))
+            });
         }
         Ok(u16::from_le_bytes(self.expression()?.to_le_bytes()))
+    }
+    fn binary_length(&mut self) -> Result<usize> {
+        if let Some(Token::Number(number)) = self.tokens.get(self.pos).cloned()
+            && self.pos.saturating_add(1) == self.tokens.len()
+        {
+            self.pos = self.pos.saturating_add(1);
+            return Ok(usize::from(
+                u16::try_from(number).context("invalid binary length")?,
+            ));
+        }
+        Ok(usize::from(
+            u16::try_from(self.expression()?).context("invalid binary length")?,
+        ))
     }
     fn expression(&mut self) -> Result<i16> {
         self.binary(0)
@@ -810,6 +834,49 @@ impl Basic {
             arrays: &self.arrays,
             strings: &self.strings,
         };
+        let saving_binary = parser.word("BSAVE");
+        if saving_binary || parser.word("BLOAD") {
+            let Some(Token::Text(path)) = parser.next() else {
+                bail!("expected quoted filename");
+            };
+            ensure!(!path.is_empty() && path.len() <= 240, "invalid filename");
+            ensure!(parser.symbol(','), "expected comma");
+            let address = parser.address()?;
+            let capacity = binary_capacity(address)?;
+            if saving_binary {
+                ensure!(parser.symbol(','), "expected comma");
+                let length = parser.binary_length()?;
+                parser.end()?;
+                ensure!(length <= capacity, "binary transfer exceeds RAM region");
+                let bytes: Vec<u8> = (0..length)
+                    .map(|offset| {
+                        let location = address
+                            .checked_add(u16::try_from(offset)?)
+                            .context("binary transfer exceeds RAM region")?;
+                        Ok(self.memory.get(&location).copied().unwrap_or_default())
+                    })
+                    .collect::<Result<_>>()?;
+                std::fs::write(&path, bytes).with_context(|| format!("saving {path}"))?;
+            } else {
+                parser.end()?;
+                let file = std::fs::File::open(&path).with_context(|| format!("loading {path}"))?;
+                let mut bytes = Vec::new();
+                file.take(u64::try_from(capacity.saturating_add(1))?)
+                    .read_to_end(&mut bytes)
+                    .with_context(|| format!("loading {path}"))?;
+                ensure!(
+                    bytes.len() <= capacity,
+                    "binary transfer exceeds RAM region"
+                );
+                for (offset, byte) in bytes.into_iter().enumerate() {
+                    let location = address
+                        .checked_add(u16::try_from(offset)?)
+                        .context("binary transfer exceeds RAM region")?;
+                    self.memory.insert(location, byte);
+                }
+            }
+            return Ok(Flow::Next);
+        }
         if parser.word("RANDOMIZE") {
             parser.randomize()?;
             return Ok(Flow::Next);
@@ -1253,7 +1320,7 @@ impl Basic {
             "HELP" => {
                 writeln!(
                     output,
-                    "Numbered lines edit the program; a bare number deletes a line.\nRUN, LIST, NEW, QUIT\nSAVE \"file.bas\", LOAD \"file.bas\" (prompt only)\nPRINT, LET, INPUT, IF ... THEN, GOTO, GOSUB, RETURN, REM, END\nDIM name(upper): zero-based arrays, 2048 total integer elements\nFOR name = start TO limit [STEP step], NEXT [name] (program only)\nSigned 16-bit integers, variables, + - * / and parentheses; comparisons = <> < <= > >="
+                    "Numbered lines edit the program; a bare number deletes a line.\nRUN, LIST, NEW, QUIT\nSAVE \"file.bas\", LOAD \"file.bas\" (prompt only)\nBSAVE \"file\",address,length; BLOAD \"file\",address: raw bytes\nBinary ranges: 0000-BFFF or EF00-FEFF; zero length allowed\nPRINT, LET, INPUT, IF ... THEN, GOTO, GOSUB, RETURN, REM, END\nDIM name(upper): zero-based arrays, 2048 total integer elements\nFOR name = start TO limit [STEP step], NEXT [name] (program only)\nSigned 16-bit integers, variables, + - * / and parentheses; comparisons = <> < <= > >="
                 )?;
                 writeln!(
                     output,
@@ -1312,6 +1379,53 @@ impl Basic {
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_files_round_trip_and_reject_invalid_load_without_writes() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rx82-reference-{}-{unique}.bin",
+            std::process::id()
+        ));
+        let name = path.to_string_lossy();
+        let mut basic = Basic::default();
+        let mut output = Vec::new();
+        basic.interact(
+            &mut format!("POKE 256,0\nPOKE 257,10\nPOKE 258,13\nPOKE 259,127\nPOKE 260,128\nPOKE 261,255\nBSAVE \"{name}\",256,6\nPOKE 256,42\nBLOAD \"{name}\",256\nPRINT PEEK(256),PEEK(261)\nQUIT\n").as_bytes(),
+            &mut output,
+        ).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), [0, 10, 13, 127, 128, 255]);
+        assert!(String::from_utf8(output).unwrap().contains("0\t255"));
+        std::fs::write(&path, [7, 8]).unwrap();
+        basic
+            .load(&format!(
+                "10 BLOAD \"{name}\",256\n20 IF 1=1 THEN BSAVE \"{name}\",256,2\n30 PRINT PEEK(257)\n40 END"
+            ))
+            .unwrap();
+        let mut program_output = Vec::new();
+        basic.run(&mut b"".as_slice(), &mut program_output).unwrap();
+        assert_eq!(program_output, b"8\n");
+        assert_eq!(std::fs::read(&path).unwrap(), [7, 8]);
+        basic.memory.insert(0xBFFF, 42);
+        std::fs::write(&path, [1, 2]).unwrap();
+        let mut failed_output = Vec::new();
+        basic
+            .interact(
+                &mut format!("BLOAD \"{name}\",49151\nQUIT\n").as_bytes(),
+                &mut failed_output,
+            )
+            .unwrap();
+        assert_eq!(basic.memory.get(&0xBFFF), Some(&42));
+        assert!(
+            String::from_utf8(failed_output)
+                .unwrap()
+                .contains("exceeds RAM region")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 
     fn execute(source: &str, input: &str) -> Result<String> {
         let mut basic = Basic::default();

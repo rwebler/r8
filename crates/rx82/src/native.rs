@@ -202,6 +202,125 @@ mod tests {
         (sys, output)
     }
     #[test]
+    fn native_binary_transfer_round_trip() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("rx82-binary-{}-{unique}.bin", std::process::id()));
+        let name = path.to_string_lossy();
+        let (_, output) = session(&format!(
+            "POKE 256,0\nPOKE 257,10\nPOKE 258,13\nPOKE 259,127\nPOKE 260,128\nPOKE 261,255\nA=256\nN=6\nBSAVE \"{name}\",256,0\nBSAVE \"{name}\",A+0,N\nPOKE 256,42\nBLOAD \"{name}\",A\nPRINT PEEK(256),PEEK(257),PEEK(258),PEEK(259),PEEK(260),PEEK(261)\nQUIT\n"
+        ));
+        assert!(path.exists(), "{output}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            [0, 10, 13, 127, 128, 255],
+            "{output}"
+        );
+        assert!(output.contains("0\t10\t13\t127\t128\t255"), "{output}");
+        let mut reference = crate::basic::Basic::default();
+        let mut reference_output = Vec::new();
+        reference
+            .interact(
+                &mut format!(
+                    "BLOAD \"{name}\",256\nPRINT PEEK(256),PEEK(261)\nPOKE 256,42\nBSAVE \"{name}\",256,6\nQUIT\n"
+                )
+                .as_bytes(),
+                &mut reference_output,
+            )
+            .unwrap();
+        assert!(
+            String::from_utf8(reference_output)
+                .unwrap()
+                .contains("0\t255")
+        );
+        let (_, interchange_output) =
+            session(&format!("BLOAD \"{name}\",256\nPRINT PEEK(256)\nQUIT\n"));
+        assert!(interchange_output.contains("42\n"), "{interchange_output}");
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn native_binary_transfer_program_and_failed_validation() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rx82-binary-program-{}-{unique}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, [7, 8]).unwrap();
+        let name = path.to_string_lossy();
+        let upper_path = std::env::temp_dir().join(format!(
+            "rx82-binary-upper-{}-{unique}.bin",
+            std::process::id()
+        ));
+        let upper_name = upper_path.to_string_lossy();
+        let (_, output) = session(&format!(
+            "A=99\nPOKE 65279,42\nBLOAD \"{name}\",65279\nPRINT A,PEEK(65279)\nBSAVE \"{name}\",65279,2\nBLOAD \"{name}\",256\n10 GOSUB 100\n20 FOR I=1 TO 2\n30 BLOAD \"{name}\",256\n40 PRINT PEEK(257)\n50 NEXT I\n60 END\n100 IF 1=1 THEN BSAVE \"{name}\",256,2\n110 POKE 256,0\n120 BLOAD \"{name}\",256\n130 POKE 61184,77\n140 BSAVE \"{upper_name}\",61184,1\n150 P=-4352\n155 BLOAD \"{upper_name}\",P+1\n160 PRINT PEEK(61185)\n170 RETURN\nRUN\nQUIT\n"
+        ));
+        assert!(output.contains("? BINARY RANGE OUTSIDE RAM"), "{output}");
+        assert!(output.contains("99\t42"), "{output}");
+        assert!(output.contains("8\n"), "{output}");
+        assert!(output.contains("77\n"), "{output}");
+        assert_eq!(std::fs::read(&path).unwrap(), [7, 8]);
+        assert_eq!(std::fs::read(&upper_path).unwrap(), [77]);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(upper_path).unwrap();
+    }
+    #[test]
+    fn native_binary_empty_file_and_negative_length() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rx82-binary-empty-{}-{unique}.bin",
+            std::process::id()
+        ));
+        let name = path.to_string_lossy();
+        let (_, output) = session(&format!(
+            "POKE 65279,42\nBSAVE \"{name}\",65279,0\nBLOAD \"{name}\",65279\nBSAVE \"{name}\",65279,-1\nPRINT PEEK(65279)\nQUIT\n"
+        ));
+        assert!(output.contains("? INVALID BINARY LENGTH"), "{output}");
+        assert!(output.contains("42\n"), "{output}");
+        assert_eq!(std::fs::read(&path).unwrap(), []);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn binary_statements_survive_text_save_and_load() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rx82-binary-source-{}-{unique}.bas",
+            std::process::id()
+        ));
+        let name = path.to_string_lossy();
+        let (_, output) = session(&format!(
+            "10 BSAVE \"data.bin\",61184,1\n20 BLOAD \"data.bin\",61185\nSAVE \"{name}\"\nNEW\nLOAD \"{name}\"\nLIST\nQUIT\n"
+        ));
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("10 BSAVE \"data.bin\",61184,1\n"), "{saved}");
+        assert!(saved.contains("20 BLOAD \"data.bin\",61185\n"), "{saved}");
+        assert!(output.contains("10 BSAVE \"data.bin\",61184,1"), "{output}");
+        let mut reference = crate::basic::Basic::default();
+        reference.load(&saved).unwrap();
+        let mut reference_output = Vec::new();
+        reference
+            .interact(&mut b"LIST\nQUIT\n".as_slice(), &mut reference_output)
+            .unwrap();
+        assert!(
+            String::from_utf8(reference_output)
+                .unwrap()
+                .contains("61185")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn native_division_matches_checked_signed_results() {
         let values = [
             i16::MIN,
