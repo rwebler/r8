@@ -32,6 +32,12 @@ enum Command {
         /// Run the native R8 ROM interpreter.
         #[clap(long)]
         native: bool,
+        /// Open the live video window and speaker (requires the live Cargo feature).
+        #[clap(long)]
+        live: bool,
+        /// Run live emulation without real-time pacing; live audio is silent.
+        #[clap(long, requires = "live")]
+        turbo: bool,
         /// Single-step native execution in the monitor (requires a source file).
         #[clap(long, requires = "native")]
         step: bool,
@@ -118,11 +124,31 @@ fn main() -> Result<()> {
         Command::Basic {
             break_before_run,
             native,
+            live,
+            turbo,
             path,
             step,
             random,
         } => {
             let random = random.device()?;
+            if live {
+                #[cfg(feature = "live")]
+                {
+                    anyhow::ensure!(
+                        !break_before_run && !step,
+                        "live mode does not combine with debugger options"
+                    );
+                    let source = path.map(fs::read_to_string).transpose()?;
+                    return if native {
+                        rx82::live::run_native(source, turbo, random)
+                    } else {
+                        rx82::live::run_reference(source, turbo, random)
+                    };
+                }
+                #[cfg(not(feature = "live"))]
+                anyhow::bail!("live mode requires building with --features live");
+            }
+            let _ = turbo;
             if native {
                 let source = path.map(fs::read_to_string).transpose()?;
                 if step || break_before_run {

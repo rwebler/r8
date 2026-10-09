@@ -1,7 +1,8 @@
 # BASIC examples
 
-Run these commands from the repository root. Every example works with both the
-Rust reference interpreter and the native R8 BASIC ROM:
+Run these commands from the repository root. Most examples work with both the
+Rust reference interpreter and the native R8 BASIC ROM; video file streaming
+requires native BASIC:
 
 ```sh
 cargo run -p rx82 -- basic crates/rx82/examples/fibonacci.bas
@@ -25,6 +26,20 @@ otherwise agree.
 | [factorials.bas](factorials.bas) | `GOSUB`, nested and zero-trip loops | 0! through 7!: 1, 1, 2, 6, 24, 120, 720, 5040 |
 | [multiplication.bas](multiplication.bas) | Nested loops, tab-separated `PRINT` | A 6 by 6 multiplication table |
 | [gcd.bas](gcd.bas) | Two inputs, integer division, conditionals, subroutines | Inputs 252 and 105 produce `GCD = 21` |
+| [video_text.bas](video_text.bas) | Raw text VRAM pairs, page retention, serial PRINT | AB appears in the window; captions remain in the terminal |
+| [video_plot.bas](video_plot.bas) | PLOT loops for an outline and diagonal | White drawing in picture mode |
+| [video_upload.bas](video_upload.bas) | Full 3840-byte READ/DATA picture upload with a live string | Checker pattern and a serial caption |
+| [video_file_stream.bas](video_file_stream.bas) | Native file-port streaming into FF33 | Loads [video_picture.bin](video_picture.bin); native mode only |
+| [sound_ports.bas](sound_ports.bas) | Tone, noise, packed volume preservation through PEEK | Tone and noise until Enter is pressed |
+| [vblank_poll.bas](vblank_poll.bas) | FF30 bit 7 polling without traps | Prints VBLANK then ACTIVE FRAME |
+
+Build with `--features live` and pass `basic --live` to see the display and
+hear sound. Both interpreters also run headlessly and retain inspectable device
+state. `video_file_stream.bas` needs native BASIC's FF10–FF14 file port and
+the repository root as its working directory. `vblank_poll.bas` polls the
+running device clock in both interpreters. Headless reference BASIC advances
+1,000 device ticks per statement; harnesses can also call `advance_devices`.
+`BLOAD` accepts RAM targets only and cannot replace the file-port stream.
 
 All examples use single-letter variable names and signed 16-bit numeric values. Squares fit
 for inputs up to 181; larger inputs eventually overflow. The GCD example accepts

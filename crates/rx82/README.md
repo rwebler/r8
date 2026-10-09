@@ -149,6 +149,9 @@ The initial dialect supports:
 - `FOR name = start TO limit [STEP step]` and `NEXT [name]` in stored programs.
 - `DATA` constants, `READ` into variables or array elements, and `RESTORE [line]`.
 - `PEEK(address)` reads a byte; `POKE address,value` writes a byte from 0 to 255.
+- `SCREEN mode` selects text (0) or picture (1); `CLS` clears the active page.
+- `COLOR ink,paper` selects palette indices 0–15; `PLOT x,y` draws in picture
+  mode at x 0–159, y 0–95. Invalid ranges or mode report `ILLEGAL QUANTITY`.
 - `GOTO line`, `GOSUB line`, `RETURN`, `END`, `STOP`, and `REM` comments.
 
 Keywords and variable names are case-insensitive; names start with a letter and
@@ -348,7 +351,9 @@ expression (`PEEK(36864+I)` overflows). Addresses in BASIC are decimal; monitor
 addresses are hexadecimal.
 
 With `--native`, both operations run as R8 loads/stores through the RX-82 bus.
-They access actual RAM, ROM, and memory-mapped devices. For example:
+Native BASIC accesses actual RAM, ROM, and memory-mapped devices. The reference
+interpreter has separate byte memory but shares the video, sound, and optional
+random device semantics. For example:
 
 ```basic
 A=4660
@@ -365,8 +370,9 @@ running machine and can disrupt it. The unused RAM at `0100`–`01FF` (decimal
 256–511) is suitable for small memory experiments; see [memory.bas](examples/memory.bas).
 
 The Rust reference interpreter provides its own 64 KiB byte
-address space. It has no emulated CPU, ROM, or BASIC variable mapping; when
-enabled, the random device occupies its register addresses in this space:
+address space. It has no emulated CPU, ROM, or BASIC variable mapping; video
+and sound registers are present, and the optional random device occupies its
+register addresses when enabled:
 `POKE 768,...` there does not change A. Reference bytes persist across `RUN`,
 `NEW`, and `LOAD`, until the interpreter session ends. In native mode these
 commands retain unused RAM but reset or replace their usual BASIC storage.
@@ -409,6 +415,87 @@ string variables and string arrays. Floating point is not implemented.
 More runnable programs and a monitor inspection walkthrough are in the
 [BASIC examples guide](examples/README.md), including Fibonacci numbers,
 factorials, a multiplication table, and Euclid's GCD algorithm.
+
+## Video and sound
+
+Both BASIC interpreters provide `SCREEN`, `CLS`, `COLOR`, and `PLOT`. `PRINT`
+always writes to the serial terminal; it never edits the display page. Text
+screens are built by writing character/attribute pairs to video RAM. For
+example, this writes `AB` to the first two cells with white ink on yellow
+paper while leaving terminal output separate:
+
+```basic
+SCREEN 0
+POKE 65329,0
+POKE 65330,0
+POKE 65331,65
+POKE 65331,113
+POKE 65331,66
+POKE 65331,113
+PRINT "caption in terminal"
+```
+
+The 40 by 24 text page uses two bytes per cell and an 8 by 8 font. Character
+codes 20–7E are ASCII, 80–9F are block glyphs, and other codes display blank.
+The 160 by 96 picture page packs four two-bit pixels per byte. Both pages are
+retained across `SCREEN` changes. `CLS` fills the active text page with spaces
+and the current paper/ink attribute, or the picture page with slot zero.
+`PLOT` writes palette slot 1 at the selected coordinate. `COLOR` changes ink
+and paper registers; it does not rewrite existing text attributes or picture
+bytes. The ASCII font was rasterized from Liberation Mono; its license is
+[recorded here](src/video-font-license.txt).
+
+| Address | Video register |
+| :--- | :--- |
+| FF30 | Mode bit 0 and read-only vblank bit 7 |
+| FF31, FF32 | 16-bit VRAM pointer, low then high |
+| FF33 | Active-page data, incrementing the pointer after each read or write |
+| FF34, FF35 | Ink and paper palette indices |
+| FF36, FF37 | Pixel X and Y latches |
+| FF38, FF39 | Picture palette slots 2 and 3 |
+| FF3A | Write low two bits to plot a slot; reads zero |
+| FF3B–FF3F | Reserved: reads zero, writes ignored |
+
+Picture slots 0, 1, 2, 3 initially map to yellow, black, red, purple. The
+fixed 16-color palette and exact packed-bit order are in
+[`video-sound-spec.md`](../../video-sound-spec.md). The VRAM pointer wraps at
+65536 and out-of-page data accesses still increment it. Video refreshes at
+60 Hz on a 4 MHz emulated clock. FF30 bit 7 is set during the final 10% of a
+frame; polling does not acknowledge or cause an interrupt.
+
+Sound has three square-wave channels and independent noise. Registers FF40–FF45
+are three low/high tone-period pairs (only four bits of each high byte count).
+FF46 contains the five-bit noise period and three independent tone mute bits;
+FF47 packs four two-bit volumes, in tone 0, 1, 2, noise order. The channel
+frequency is `1789773/(16*period)` Hz for a nonzero period. Period or volume
+zero silences a channel. This plays approximate middle C at full volume on
+tone 0 from the reset state:
+
+```basic
+POKE 65344,172
+POKE 65345,1
+POKE 65351,3
+```
+
+FF47 replaces **all** packed volumes on each write. Read it with `PEEK` and
+preserve other fields when changing one channel; see
+[`sound_ports.bas`](examples/sound_ports.bas). Sound and video registers work
+headlessly, too. Harnesses can call `System::advance_devices` or
+`Basic::advance_devices` to move device time explicitly.
+Headless reference BASIC advances 1,000 device ticks per executed statement;
+live mode uses elapsed time instead. Native BASIC advances with CPU ticks.
+
+Build with SDL2 installed and open the live display and speaker with:
+
+```sh
+cargo run -p rx82 --features live -- basic --live --native crates/rx82/examples/video_plot.bas
+cargo run -p rx82 --features live -- basic --live crates/rx82/examples/video_text.bas
+```
+
+The window uses integer nearest-neighbor scaling and letterboxing. Audio can
+be unavailable while video remains usable. `--turbo` runs without audio and
+drops stale frames. Closing the window, QUIT, or terminal EOF ends a live
+session. The headless build does not need SDL2.
 
 ## Native BASIC ROM
 
@@ -496,7 +583,7 @@ The stock reset vector still points to `C000`; reset enters the system firmware,
 not BASIC. This is a fixed address expansion window, not bank switching or
 automatic firmware discovery. Modules must be assembled for their load address.
 
-Memory layout: console at `FF00`–`FF02`, BASIC code within `C100`–`EEFF`,
+Memory layout: console at `FF00`–`FF02`, BASIC code within `C100`–`ED43`,
 original system firmware at `C000`–`C0FF`, reset vector at `FFFE`, and optional
 string RAM at `EF00`–`FEFF`. The BASIC frontend installs that RAM ahead of the
 stock ROM's zero padding. Ordinary machines retain the stock memory map.
@@ -541,7 +628,7 @@ random remainder divisor, and builds decimal values; the decimal parser uses
 a two-bit shift only after its 6553 precheck. Signed results, truncation toward
 zero, overflow checks, and division by zero errors are preserved.
 
-The SHL changes reduced the BASIC ROM from 10,537 to 10,523 bytes. The isolated
+The earlier SHL change reduced the BASIC ROM from 10,537 to 10,523 bytes. The isolated
 arithmetic harness measured 646 to 618 R8 cycles for `181 * 181`, 1,005 to
 945 for `-32768 * 1`, 1,639 to 1,519 for `30000 / 1`, and 1,483 to 1,379 for
 `30000 / 7`. These compare the same binary algorithms before and after SHL.
@@ -779,6 +866,10 @@ Write both seed bytes, low first, when reseeding through `POKE`. Reading status
 or seed registers does not advance the generator. Monitor dumps that include
 `FF20` **do** consume a byte, as do direct `PEEK` calls, affecting later results.
 With no device installed these addresses read the stock ROM's zero padding.
+
+The default `System` installs video (FF30–FF3F) and sound (FF40–FF47) devices
+ahead of ROM. Their state is available through `System::video` and
+`System::sound`. The host BASIC interpreter uses the same register models.
 
 ## Boot process
 

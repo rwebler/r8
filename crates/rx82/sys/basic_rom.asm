@@ -1,5 +1,6 @@
 ; RX-82 native BASIC. All text parsing, editing and execution runs on R8.
-; Conditional jumps use an inverted short branch over an absolute JMP.
+; Nearby conditional targets use short branches; distant targets use inverted
+; short branches over absolute JMPs. Recheck displacements when adding code.
 ; Devices: FF00..02 console; FF10..14 raw file byte stream.
 ; 0092 subroutine stack pointer, 0094 loop stack pointer.
 ; 00A6..AC file transfer state (LOAD validates before replacing the program).
@@ -49,12 +50,34 @@ STATEMENT_BODY:
     call SPACE
     cmp a, 0x00
     bne LONG_45
-    jmp DONE
+    ret
 LONG_45:
     cmp a, 0x3F
     bne LONG_47
     jmp PRINT_SHORT
 LONG_47:
+VIDEO_DISPATCH_START:
+    ld cd, KW_SCREEN
+    call MATCH
+    bne VIDEO_NEXT_SCREEN
+    jmp VIDEO_SCREEN
+VIDEO_NEXT_SCREEN:
+    ld cd, KW_CLS
+    call MATCH
+    bne VIDEO_NEXT_CLS
+    jmp VIDEO_CLS
+VIDEO_NEXT_CLS:
+    ld cd, KW_COLOR
+    call MATCH
+    bne VIDEO_NEXT_COLOR
+    jmp VIDEO_COLOR
+VIDEO_NEXT_COLOR:
+    ld cd, KW_PLOT
+    call MATCH
+    bne VIDEO_NEXT_PLOT
+    jmp VIDEO_PLOT
+VIDEO_NEXT_PLOT:
+VIDEO_DISPATCH_END:
     ld cd, KW_HELP
     call MATCH
     bne LONG_50
@@ -142,8 +165,7 @@ LONG_71:
 LONG_74:
     ld cd, KW_REM
     call MATCH
-    bne LONG_77
-    jmp DONE
+    beq DONE
 LONG_77:
     ld cd, KW_PRINT
     call MATCH
@@ -162,13 +184,11 @@ LONG_83:
 LONG_86:
     ld cd, KW_END
     call MATCH
-    bne LONG_89
-    jmp END_RUN
+    beq END_RUN
 LONG_89:
     ld cd, KW_STOP
     call MATCH
-    bne LONG_92
-    jmp END_RUN
+    beq END_RUN
 LONG_92:
     ld cd, KW_RUN
     call MATCH
@@ -182,13 +202,11 @@ LONG_95:
 LONG_98:
     ld cd, KW_NEW
     call MATCH
-    bne LONG_101
-    jmp NEW
+    beq NEW
 LONG_101:
     ld cd, KW_QUIT
     call MATCH
-    bne LONG_104
-    jmp QUIT
+    beq QUIT
 LONG_104:
     jmp ASSIGN
 DONE:
@@ -222,8 +240,7 @@ CLEAR_VAR:
     ld (cd), a
     inc cd
     cmp cd, 0x0334
-    beq LONG_141
-    jmp CLEAR_VAR
+    bne CLEAR_VAR
 LONG_141:
     jmp CLEAR_ARRAYS
  ; Packed editor. E0 insertion, E2 old tail, E4 new size, E6 line.
@@ -413,7 +430,7 @@ LIST_NEXT:
     call FIND_NEXT
     cmp cd, 0x0000
     bne LONG_236
-    jmp DONE
+    ret
 LONG_236:
     ld ab, ef
     push ab
@@ -450,15 +467,13 @@ RUN_NEXT:
     ld f, (cd)
     ld e, (cd+0x01)
     cmp ef, 0x0000
-    bne RUN_HEADER
-    jmp RUN_DONE
+    beq RUN_DONE
 RUN_HEADER:
     ld cd, ef
     ld f, (cd)
     ld e, (cd+0x01)
     cmp ef, 0x0000
-    bne RUN_LINE
-    jmp RUN_DONE
+    beq RUN_DONE
 RUN_LINE:
     ld 0x0084, f
     ld 0x0085, e
@@ -473,8 +488,7 @@ RUN_LINE:
     ld cd, 0x0082
     ld a, (cd)
     cmp a, 0x00
-    beq LONG_280
-    jmp RUN_NEXT
+    bne RUN_NEXT
 LONG_280:
 RUN_DONE:
     ld a, 0x00
@@ -510,8 +524,7 @@ LONG_305:
     ld cd, 0x00A4
     ld c, (cd)
     cmp c, 0x00
-    bne LONG_309
-    jmp GOTO_STORE
+    beq GOTO_STORE
 LONG_309:
     call PRUNE_LOOPS
 GOTO_STORE:
@@ -558,12 +571,10 @@ PRINT_VALUE:
 PRINT_AFTER:
     call SPACE
     cmp a, 0x3B
-    bne LONG_354
-    jmp PRINT_SEPARATOR
+    beq PRINT_SEPARATOR
 LONG_354:
     cmp a, 0x2C
-    beq LONG_356
-    jmp PRINT_END
+    bne PRINT_END
 LONG_356:
     ld a, 0x09
     call PUTCHAR
@@ -572,7 +583,7 @@ PRINT_SEPARATOR:
     call SPACE
     cmp a, 0x00
     bne LONG_363
-    jmp DONE
+    ret
 LONG_363:
     jmp PRINT_ITEM
 PRINT_END:
@@ -590,12 +601,10 @@ EXPR_MORE:
     ld c, a
     pop ab
     cmp c, 0x2B
-    bne LONG_380
-    jmp EXPR_OPERATOR
+    beq EXPR_OPERATOR
 LONG_380:
     cmp c, 0x2D
-    beq LONG_382
-    jmp EXPR_DONE
+    bne EXPR_DONE
 LONG_382:
 EXPR_OPERATOR:
     inc gh
@@ -606,8 +615,7 @@ EXPR_OPERATOR:
     pop cd
     pop ab
     cmp c, 0x2B
-    bne LONG_392
-    jmp EXPR_ADD
+    beq EXPR_ADD
 LONG_392:
     call SUB_SIGNED
     jmp EXPR_MORE
@@ -628,12 +636,10 @@ TERM_MORE:
     ld c, a
     pop ab
     cmp c, 0x2A
-    bne LONG_412
-    jmp TERM_OPERATOR
+    beq TERM_OPERATOR
 LONG_412:
     cmp c, 0x2F
-    beq LONG_414
-    jmp TERM_DONE
+    bne TERM_DONE
 LONG_414:
 TERM_OPERATOR:
     inc gh
@@ -644,8 +650,7 @@ TERM_OPERATOR:
     pop cd
     pop ab
     cmp c, 0x2A
-    bne LONG_424
-    jmp TERM_MULTIPLY
+    beq TERM_MULTIPLY
 LONG_424:
     call DIV_SIGNED
     jmp TERM_MORE
@@ -672,8 +677,7 @@ LONG_440:
     jmp VALUE_NEG
 LONG_442:
     cmp a, 0x2B
-    bne LONG_444
-    jmp VALUE_PLUS
+    beq VALUE_PLUS
 LONG_444:
     cmp a, 0xB0
     bne VALUE_NOT_TOKEN
@@ -682,12 +686,10 @@ VALUE_NOT_TOKEN:
     cmp a, 0xB2
     beq LONG_448
     cmp a, 0x30
-    bcs LONG_446
-    jmp VALUE_VAR
+    bcc VALUE_VAR
 LONG_446:
     cmp a, 0x3A
-    bcc LONG_448
-    jmp VALUE_VAR
+    bcs VALUE_VAR
 LONG_448:
     call NUMBER
     cmp ab, 0x8000
@@ -755,17 +757,14 @@ VALUE_NEG:
     cmp a, 0xB0
     beq VALUE_NEG_RECURSE
     cmp a, 0x30
-    bcs LONG_475
-    jmp VALUE_NEG_RECURSE
+    bcc VALUE_NEG_RECURSE
 LONG_475:
     cmp a, 0x3A
-    bcc LONG_477
-    jmp VALUE_NEG_RECURSE
+    bcs VALUE_NEG_RECURSE
 LONG_477:
     call NUMBER
     cmp ab, 0x8000
-    bne LONG_480
-    jmp NEGATE
+    beq NEGATE
 LONG_480:
     bcc LONG_481
     jmp OVERFLOW
@@ -796,8 +795,7 @@ ADD_SIGNED:
     clc
     add ab, ef
     cmp c, d
-    beq LONG_506
-    jmp ADD_OK
+    bne ADD_OK
 LONG_506:
     ld d, a
     and d, 0x80
@@ -817,8 +815,7 @@ SUB_SIGNED:
     sec
     sub ab, ef
     cmp c, d
-    bne LONG_523
-    jmp ADD_OK
+    beq ADD_OK
 LONG_523:
     ld d, a
     and d, 0x80
@@ -832,15 +829,13 @@ LONG_527:
 MAGNITUDES:
     ld c, 0x00
     cmp a, 0x80
-    bcs LONG_534
-    jmp MAG_RIGHT
+    bcc MAG_RIGHT
 LONG_534:
     call NEGATE
     inc c
 MAG_RIGHT:
     cmp e, 0x80
-    bcs LONG_539
-    jmp MAG_DONE
+    bcc MAG_DONE
 LONG_539:
     push ab
     ld ab, ef
@@ -856,21 +851,17 @@ MAG_RESULT:
     ld cd, 0x0090
     ld c, (cd)
     cmp c, 0x00
-    bne LONG_554
-    jmp MAG_POSITIVE
+    beq MAG_POSITIVE
 LONG_554:
     cmp ab, 0x8000
-    bne LONG_556
-    jmp NEGATE
+    beq NEGATE
 LONG_556:
-    bcc LONG_557
-    jmp OVERFLOW
+    bcs OVERFLOW
 LONG_557:
     jmp NEGATE
 MAG_POSITIVE:
     cmp ab, 0x8000
-    bcc LONG_561
-    jmp OVERFLOW
+    bcs OVERFLOW
 LONG_561:
     ret
 MUL_SIGNED:
@@ -885,8 +876,7 @@ MUL_LOOP:
     bcc MUL_SHIFT
     clc
     add cd, ef
-    bcc MUL_SHIFT
-    jmp OVERFLOW
+    bcs OVERFLOW
 MUL_SHIFT:
     ; Do not double after the last bit: -32768 * 1 must remain valid.
     cmp ab, 0x0000
@@ -903,8 +893,7 @@ MUL_DONE:
 DIV_SIGNED:
     push cd
     cmp ef, 0x0000
-    bne LONG_583
-    jmp DIV_ZERO
+    beq DIV_ZERO
 LONG_583:
     call MAGNITUDES
     push gh
@@ -986,23 +975,19 @@ NUMBER_TEXT:
 NUMBER_NEXT:
     call PEEK
     cmp a, 0x30
-    bcs LONG_630
-    jmp NUMBER_DONE
+    bcc NUMBER_DONE
 LONG_630:
     cmp a, 0x3A
-    bcc LONG_632
-    jmp NUMBER_DONE
+    bcs NUMBER_DONE
 LONG_632:
     sec
     sub a, 0x30
     ld b, a
     ld a, 0x00
     cmp ef, 0x1999
-    bcs LONG_638
-    jmp NUMBER_ACCUMULATE
+    bcc NUMBER_ACCUMULATE
 LONG_638:
-    beq LONG_639
-    jmp OVERFLOW
+    bne OVERFLOW
 LONG_639:
     cmp b, 0x06
     bcc LONG_641
@@ -1035,8 +1020,7 @@ PRINT_NUM:
     push ef
     push gh
     cmp a, 0x80
-    bcs LONG_668
-    jmp PRINT_POSITIVE
+    bcc PRINT_POSITIVE
 LONG_668:
     push ab
     ld a, 0x2D
@@ -1066,8 +1050,7 @@ PRINT_DIGIT:
     ld b, 0x00
 DIGIT_SUB:
     cmp ef, cd
-    bcs LONG_697
-    jmp DIGIT_END
+    bcc DIGIT_END
 LONG_697:
     sec
     sub ef, cd
@@ -1075,12 +1058,11 @@ LONG_697:
     jmp DIGIT_SUB
 DIGIT_END:
     cmp b, 0x00
-    beq LONG_704
-    jmp DIGIT_EMIT
+    bne DIGIT_EMIT
 LONG_704:
     cmp gh, 0x0000
     bne LONG_706
-    jmp DONE
+    ret
 LONG_706:
 DIGIT_EMIT:
     ld gh, 0x0001
@@ -1093,12 +1075,10 @@ DIGIT_EMIT:
 PEEK:
     ld a, (gh)
     cmp a, 0x61
-    bcs LONG_718
-    jmp PEEK_DONE
+    bcc PEEK_DONE
 LONG_718:
     cmp a, 0x7B
-    bcc LONG_720
-    jmp PEEK_DONE
+    bcs PEEK_DONE
 LONG_720:
     sec
     sub a, 0x20
@@ -1107,12 +1087,11 @@ PEEK_DONE:
 SPACE:
     call PEEK
     cmp a, 0x20
-    bne LONG_728
-    jmp SPACE_NEXT
+    beq SPACE_NEXT
 LONG_728:
     cmp a, 0x09
     beq LONG_730
-    jmp DONE
+    ret
 LONG_730:
 SPACE_NEXT:
     inc gh
@@ -1152,13 +1131,11 @@ MATCH_TEXT:
 MATCH_NEXT:
     ld e, (cd)
     cmp e, 0x00
-    bne LONG_745
-    jmp MATCH_BOUNDARY
+    beq MATCH_BOUNDARY
 LONG_745:
     call PEEK
     cmp a, e
-    beq LONG_748
-    jmp MATCH_FAIL
+    bne MATCH_FAIL
 LONG_748:
     inc gh
     inc cd
@@ -1193,20 +1170,16 @@ READLINE_START:
 READLINE_NEXT:
     call GETCHAR
     cmp a, 0x0D
-    bne LONG_775
-    jmp READLINE_NEXT
+    beq READLINE_NEXT
 LONG_775:
     cmp a, 0x0A
-    bne LONG_777
-    jmp READLINE_END
+    beq READLINE_END
 LONG_777:
     cmp a, 0xFF
-    bne LONG_779
-    jmp READLINE_FILE_END
+    beq READLINE_FILE_END
 LONG_779:
     cmp a, 0x09
-    bne LONG_781
-    jmp READLINE_STORE
+    beq READLINE_STORE
 LONG_781:
     cmp a, 0x20
     bcs LONG_783
@@ -1257,13 +1230,11 @@ GETCHAR_WAIT:
     ld b, a
     and a, 0x01
     cmp a, 0x00
-    beq LONG_810
-    jmp GETCHAR_READY
+    bne GETCHAR_READY
 LONG_810:
     and b, 0x02
     cmp b, 0x00
-    beq LONG_813
-    jmp QUIT_EOF
+    bne QUIT_EOF
 LONG_813:
     jmp GETCHAR_WAIT
 GETCHAR_READY:
@@ -1279,8 +1250,7 @@ PUTCHAR:
     ld cd, 0x00A8
     ld b, (cd)
     cmp b, 0x00
-    bne LONG_828
-    jmp PUTCHAR_CONSOLE
+    beq PUTCHAR_CONSOLE
 LONG_828:
     ld 0xFF13, a
     call FILE_CHECK
@@ -1298,7 +1268,7 @@ PUTS:
     ld a, (cd)
     cmp a, 0x00
     bne LONG_844
-    jmp DONE
+    ret
 LONG_844:
     call PUTCHAR
     inc cd
@@ -1331,8 +1301,7 @@ REPORT_DRAINED:
     ld cd, 0x0082
     ld a, (cd)
     cmp a, 0x00
-    bne LONG_861
-    jmp ERROR_NEWLINE
+    beq ERROR_NEWLINE
 LONG_861:
     ld cd, IN_LINE_TEXT
     call PUTS
@@ -1367,26 +1336,21 @@ LONG_906:
 ; Signed comparison AB versus EF returns C=1 less, 2 equal, 4 greater.
 COMPARE:
     cmp a, 0x80
-    bcs LONG_913
-    jmp COMP_LEFT_POS
+    bcc COMP_LEFT_POS
 LONG_913:
     cmp e, 0x80
-    bcs LONG_915
-    jmp COMP_LESS
+    bcc COMP_LESS
 LONG_915:
     jmp COMP_UNSIGNED
 COMP_LEFT_POS:
     cmp e, 0x80
-    bcc LONG_919
-    jmp COMP_GREATER
+    bcs COMP_GREATER
 LONG_919:
 COMP_UNSIGNED:
     cmp ab, ef
-    bcs LONG_922
-    jmp COMP_LESS
+    bcc COMP_LESS
 LONG_922:
-    bne LONG_923
-    jmp COMP_EQUAL
+    beq COMP_EQUAL
 LONG_923:
 COMP_GREATER:
     ld c, 0x04
@@ -1424,13 +1388,11 @@ IF_LEFT_READY:
     beq IF_OPERATOR_DONE
     ld b, 0x02
     cmp a, 0x3D
-    bne LONG_939
-    jmp IF_OPERATOR_DONE
+    beq IF_OPERATOR_DONE
 LONG_939:
     ld b, 0x01
     cmp a, 0x3C
-    bne LONG_942
-    jmp IF_LESS_OP
+    beq IF_LESS_OP
 LONG_942:
     ld b, 0x04
     cmp a, 0x3E
@@ -1440,8 +1402,7 @@ LONG_945:
     inc gh
     call PEEK
     cmp a, 0x3D
-    beq LONG_949
-    jmp IF_RIGHT
+    bne IF_RIGHT
 LONG_949:
     ld b, 0x06
     jmp IF_OPERATOR_DONE
@@ -1449,12 +1410,10 @@ IF_LESS_OP:
     inc gh
     call PEEK
     cmp a, 0x3D
-    bne LONG_956
-    jmp IF_LE_OP
+    beq IF_LE_OP
 LONG_956:
     cmp a, 0x3E
-    beq LONG_958
-    jmp IF_RIGHT
+    bne IF_RIGHT
 LONG_958:
     ld b, 0x05
     jmp IF_OPERATOR_DONE
@@ -1489,48 +1448,41 @@ IF_COMPARED:
 LONG_976:
     pop cd
     cmp c, d
-    bne LONG_979
-    jmp IF_TRUE
+    beq IF_TRUE
 LONG_979:
     cmp d, 0x03
-    beq LONG_981
-    jmp IF_GE_TEST
+    bne IF_GE_TEST
 LONG_981:
     cmp c, 0x04
-    beq LONG_983
-    jmp IF_TRUE
+    bne IF_TRUE
 LONG_983:
     ret
 IF_GE_TEST:
     cmp d, 0x06
-    beq LONG_987
-    jmp IF_NE_TEST
+    bne IF_NE_TEST
 LONG_987:
     cmp c, 0x01
-    beq LONG_989
-    jmp IF_TRUE
+    bne IF_TRUE
 LONG_989:
     ret
 IF_NE_TEST:
     cmp d, 0x05
     beq LONG_993
-    jmp DONE
+    ret
 LONG_993:
     cmp c, 0x02
     bne LONG_995
-    jmp DONE
+    ret
 LONG_995:
 IF_TRUE:
     call SPACE
     cmp a, 0xB2
     beq LONG_1001
     cmp a, 0x30
-    bcs LONG_999
-    jmp IF_STATEMENT
+    bcc IF_STATEMENT
 LONG_999:
     cmp a, 0x3A
-    bcc LONG_1001
-    jmp IF_STATEMENT
+    bcs IF_STATEMENT
 LONG_1001:
     jmp GOTO
 IF_STATEMENT:
@@ -1632,12 +1584,10 @@ TARGET:
     beq LONG_1089
 TARGET_SOURCE:
     cmp a, 0x30
-    bcs LONG_1087
-    jmp TARGET_EXPR
+    bcc TARGET_EXPR
 LONG_1087:
     cmp a, 0x3A
-    bcc LONG_1089
-    jmp TARGET_EXPR
+    bcs TARGET_EXPR
 LONG_1089:
     call NUMBER
     push ab
@@ -1645,8 +1595,7 @@ LONG_1089:
     ld e, a
     pop ab
     cmp e, 0x00
-    beq LONG_1096
-    jmp TARGET_EXPR
+    bne TARGET_EXPR
 LONG_1096:
     pop cd
     ret
@@ -1684,8 +1633,7 @@ LONG_1129:
     call SPACE
     ld cd, KW_STEP
     call MATCH
-    beq LONG_1135
-    jmp FOR_DEFAULT_STEP
+    bne FOR_DEFAULT_STEP
 LONG_1135:
     call EXPR
     jmp FOR_STEP_READY
@@ -1717,8 +1665,7 @@ LONG_1142:
     ld gh, 0x0500
 FOR_ACTIVE_SCAN:
     cmp gh, ef
-    bne LONG_1164
-    jmp FOR_FIND_END
+    beq FOR_FIND_END
 LONG_1164:
     ld b, (gh+0x04)
     ld a, (gh+0x05)
@@ -1749,20 +1696,17 @@ LONG_1181:
     call SPACE
     ld cd, KW_FOR
     call MATCH
-    beq LONG_1190
-    jmp FOR_SCAN_CLOSE
+    bne FOR_SCAN_CLOSE
 LONG_1190:
     inc (0x0096)
     jmp FOR_SCAN_ADVANCE
 FOR_SCAN_CLOSE:
     ld cd, KW_NEXT
     call MATCH
-    beq LONG_1196
-    jmp FOR_SCAN_ADVANCE
+    bne FOR_SCAN_ADVANCE
 LONG_1196:
     dec (0x0096)
-    bne LONG_1198
-    jmp FOR_MATCHED
+    beq FOR_MATCHED
 LONG_1198:
 FOR_SCAN_ADVANCE:
     ld cd, 0x00A0
@@ -1772,8 +1716,7 @@ FOR_SCAN_ADVANCE:
 FOR_MATCHED:
     call SPACE
     cmp a, 0x00
-    bne LONG_1207
-    jmp FOR_SET
+    beq FOR_SET
 LONG_1207:
     call VARIABLE
     push cd
@@ -1801,18 +1744,15 @@ FOR_SET:
     ld cd, 0x009F
     ld a, (cd)
     cmp a, 0x80
-    bcc LONG_1232
-    jmp FOR_NEGATIVE
+    bcs FOR_NEGATIVE
 LONG_1232:
     cmp b, 0x04
-    bne LONG_1234
-    jmp FOR_SKIP
+    beq FOR_SKIP
 LONG_1234:
     jmp FOR_PUSH
 FOR_NEGATIVE:
     cmp b, 0x01
-    bne LONG_1238
-    jmp FOR_SKIP
+    beq FOR_SKIP
 LONG_1238:
 FOR_PUSH:
     ld cd, 0x0094
@@ -1865,7 +1805,7 @@ LOOP_BASE:
     ld cd, 0x0500
     cmp ef, 0x0400
     bne LONG_1287
-    jmp DONE
+    ret
 LONG_1287:
     sec
     sub ef, 0x0002
@@ -1888,8 +1828,7 @@ LONG_1300:
     ld 0x00A3, a
     call SPACE
     cmp a, 0x00
-    bne LONG_1307
-    jmp NEXT_MATCH
+    beq NEXT_MATCH
 LONG_1307:
     call VARIABLE
     push cd
@@ -1942,18 +1881,15 @@ LONG_1330:
     pop ef
     ld a, (ef+0x09)
     cmp a, 0x80
-    bcc LONG_1355
-    jmp NEXT_NEGATIVE
+    bcs NEXT_NEGATIVE
 LONG_1355:
     cmp d, 0x04
-    bne LONG_1357
-    jmp NEXT_POP
+    beq NEXT_POP
 LONG_1357:
     jmp NEXT_REPEAT
 NEXT_NEGATIVE:
     cmp d, 0x01
-    bne LONG_1361
-    jmp NEXT_POP
+    beq NEXT_POP
 LONG_1361:
 NEXT_REPEAT:
     ld b, (ef)
@@ -1976,28 +1912,23 @@ PRUNE_AGAIN:
     ld f, (cd)
     ld e, (cd+0x01)
     cmp ef, gh
-    bne LONG_1391
-    jmp PRUNE_DONE
+    beq PRUNE_DONE
 LONG_1391:
     sec
     sub ef, 0x0010
     ld d, (ef)
     ld c, (ef+0x01)
     cmp ab, cd
-    bcs LONG_1397
-    jmp PRUNE_POP
+    bcc PRUNE_POP
 LONG_1397:
-    bne LONG_1398
-    jmp PRUNE_POP
+    beq PRUNE_POP
 LONG_1398:
     ld d, (ef+0x02)
     ld c, (ef+0x03)
     cmp ab, cd
-    bcs LONG_1402
-    jmp PRUNE_DONE
+    bcc PRUNE_DONE
 LONG_1402:
-    bne LONG_1403
-    jmp PRUNE_DONE
+    beq PRUNE_DONE
 LONG_1403:
 PRUNE_POP:
     ld 0x0094, f
@@ -2068,8 +1999,7 @@ FILENAME_CHAR:
     jmp UNTERMINATED_STRING
 LONG_1439:
     cmp a, 0x22
-    bne LONG_1441
-    jmp FILENAME_END
+    beq FILENAME_END
 LONG_1441:
     inc b
     ld 0xFF12, a
@@ -2155,8 +2085,7 @@ BINARY_LENGTH_LITERAL:
     cmp c, 0xB0
     bne BINARY_LENGTH_LITERAL_OK
     cmp a, 0x80
-    bcc BINARY_LENGTH_LITERAL_OK
-    jmp BINARY_BAD_LENGTH
+    bcs BINARY_BAD_LENGTH
 BINARY_LENGTH_LITERAL_OK:
     push ab
     call SPACE
@@ -2168,8 +2097,7 @@ BINARY_LENGTH_EXPR:
     pop gh
     call EXPR
     cmp a, 0x80
-    bcc BINARY_LENGTH_OK
-    jmp BINARY_BAD_LENGTH
+    bcs BINARY_BAD_LENGTH
 BINARY_LENGTH_OK:
     ret
 BINARY_LENGTH_DONE:
@@ -2215,8 +2143,7 @@ BSAVE_BYTE:
     ld b, (cd)
     ld a, (cd+0x01)
     cmp ab, 0x0000
-    bne BSAVE_BYTE_MORE
-    jmp BINARY_CLOSE
+    beq BINARY_CLOSE
 BSAVE_BYTE_MORE:
     dec ab
     ld (cd), b
@@ -2253,8 +2180,7 @@ BLOAD_SCAN:
     ld a, (cd)
     and a, 0x02
     cmp a, 0x00
-    beq BLOAD_SCAN_MORE
-    jmp BLOAD_REWIND
+    bne BLOAD_REWIND
 BLOAD_SCAN_MORE:
     ld cd, 0x00D5
     ld b, (cd)
@@ -2351,8 +2277,7 @@ LOAD_LINE:
     ld cd, 0x00A7
     ld a, (cd)
     cmp a, 0x00
-    beq LONG_1489
-    jmp LOAD_EOF
+    bne LOAD_EOF
 LONG_1489:
     call READ_TOKEN_LINE
     ld cd, 0x00E6
@@ -2367,12 +2292,10 @@ LOAD_NUMBERED:
     ld cd, 0x00AC
     ld c, (cd)
     cmp c, 0x00
-    beq LONG_1508
-    jmp LOAD_INSTALL
+    bne LOAD_INSTALL
 LONG_1508:
     cmp ef, 0x0901
-    bne LOAD_HAS_BODY
-    jmp LOAD_LINE
+    beq LOAD_LINE
 LOAD_HAS_BODY:
     ld ab, ef
     sec
@@ -2401,8 +2324,7 @@ LOAD_EOF:
     ld cd, 0x00AC
     ld a, (cd)
     cmp a, 0x00
-    beq LONG_1525
-    jmp LOAD_DONE
+    bne LOAD_DONE
 LONG_1525:
     ; Rewind the immutable byte snapshot, then install. Validation has not
     ; touched the program chain or variables. The second pass cannot exceed RAM.
@@ -2429,8 +2351,7 @@ GETFILE:
     ld a, (cd)
     and a, 0x02
     cmp a, 0x00
-    beq LONG_1551
-    jmp GETFILE_EOF
+    bne GETFILE_EOF
 LONG_1551:
     ld cd, 0xFF13
     ld a, (cd)
@@ -2456,6 +2377,10 @@ HELP:
     ld cd, HELP_TEXT
     jmp PUTS
 HELP_TEXT:
+VIDEO_HELP_START:
+    data "SCREEN 0/1; CLS; COLOR ink,paper; PLOT x,y", 0x0A
+    data "PRINT stays serial; video/sound ports: PEEK/POKE", 0x0A
+VIDEO_HELP_END:
     data "RX-82 native ROM: numbered lines; LIST RUN NEW SAVE LOAD QUIT", 0x0A
     data "BSAVE file,address,length; BLOAD file,address (quoted raw files)", 0x0A
     data "Binary ranges: 0000-BFFF or EF00-FEFF; zero length allowed", 0x0A
@@ -2754,8 +2679,7 @@ DIM_NONNEGATIVE:
     ld f, (cd)
     ld e, (cd+0x01)
     cmp ef, 0x0000
-    beq DIM_UNALLOCATED
-    jmp ARRAY_ALREADY_DIMENSIONED
+    bne ARRAY_ALREADY_DIMENSIONED
 DIM_UNALLOCATED:
     cmp ab, 0x0800
     bcc DIM_SIZE_OK
@@ -2773,8 +2697,7 @@ DIM_SIZE_OK:
     add ef, ab
     cmp ef, 0xA000
     bcc DIM_FITS
-    beq DIM_FITS
-    jmp ARRAY_MEMORY_FULL
+    bne ARRAY_MEMORY_FULL
 DIM_FITS:
     pop ab
     ld (cd), h
@@ -3082,12 +3005,10 @@ STRING_ATOM:
     jmp STACK_PUSH
 STRING_ATOM_TEXT:
     cmp a, 0x22
-    bne STRING_ATOM_NOT_LITERAL
-    jmp STRING_LITERAL
+    beq STRING_LITERAL
 STRING_ATOM_NOT_LITERAL:
     cmp a, 0x28
-    bne STRING_ATOM_NOT_PAREN
-    jmp STRING_PAREN
+    beq STRING_PAREN
 STRING_ATOM_NOT_PAREN:
     call IS_STRING
     bne STRING_NAMED
@@ -3572,19 +3493,16 @@ LENGTH_STRING_EXPRESSION:
 LENGTH_ARRAY:
     call SPACE
     cmp a, 0x41
-    bcs LENGTH_ARRAY_LETTER
-    jmp TYPE_MISMATCH
+    bcc TYPE_MISMATCH
 LENGTH_ARRAY_LETTER:
     cmp a, 0x5B
-    bcc LENGTH_ARRAY_NAME
-    jmp TYPE_MISMATCH
+    bcs TYPE_MISMATCH
 LENGTH_ARRAY_NAME:
     call VARIABLE
     push cd
     call SPACE
     cmp a, 0x29
-    beq LENGTH_ARRAY_END
-    jmp TYPE_MISMATCH
+    bne TYPE_MISMATCH
 LENGTH_ARRAY_END:
     pop cd
     call ARRAY_DESCRIPTOR
@@ -3634,8 +3552,7 @@ RESET_DATA:
 RESTORE_DATA:
     call SPACE
     cmp a, 0x00
-    bne RESTORE_LINE
-    jmp RESET_DATA
+    beq RESET_DATA
 RESTORE_LINE:
     cmp a, 0xB2
     beq RESTORE_NUMBER
@@ -3727,8 +3644,7 @@ DATA_ITEM:
     ld h, (cd)
     ld g, (cd+0x01)
     cmp gh, 0x0000
-    beq DATA_SCAN
-    jmp DATA_PARSE
+    bne DATA_PARSE
 DATA_SCAN:
     ld cd, 0x00B4
     ld b, (cd)
@@ -3819,8 +3735,7 @@ DATA_SEPARATOR:
     cmp a, 0x00
     beq DATA_LINE_DONE
     cmp a, 0x2C
-    beq DATA_NEXT_ITEM
-    jmp INVALID_DATA
+    bne INVALID_DATA
 DATA_NEXT_ITEM:
     inc gh
     ld 0x00BA, h
@@ -3905,12 +3820,10 @@ MEM_ADDRESS:
     cmp a, 0xB2
     beq MEM_ADDRESS_LITERAL
     cmp a, 0x30
-    bcs MEM_ADDRESS_DIGIT
-    jmp MEM_ADDRESS_EXPR
+    bcc MEM_ADDRESS_EXPR
 MEM_ADDRESS_DIGIT:
     cmp a, 0x3A
-    bcc MEM_ADDRESS_LITERAL
-    jmp MEM_ADDRESS_EXPR
+    bcs MEM_ADDRESS_EXPR
 MEM_ADDRESS_LITERAL:
     call NUMBER
     push ab
@@ -3953,14 +3866,12 @@ POKE_BYTE:
     push ab
     call SPACE
     cmp a, 0x2C
-    beq POKE_BYTE_VALUE
-    jmp EXPECTED_COMMA
+    bne EXPECTED_COMMA
 POKE_BYTE_VALUE:
     inc gh
     call EXPR
     cmp a, 0x00
-    beq POKE_BYTE_VALID
-    jmp BYTE_OUT_OF_RANGE
+    bne BYTE_OUT_OF_RANGE
 POKE_BYTE_VALID:
     push ab
     call EOL
@@ -4418,6 +4329,16 @@ KW_VAL:
     data 0xA5, "VAL", 0x00
 KW_INSTR:
     data 0xA6, "INSTR", 0x00
+VIDEO_KEYWORDS_START:
+KW_SCREEN:
+    data 0xA9, "SCREEN", 0x00
+KW_CLS:
+    data 0xAA, "CLS", 0x00
+KW_COLOR:
+    data 0xAB, "COLOR", 0x00
+KW_PLOT:
+    data 0xAC, "PLOT", 0x00
+VIDEO_KEYWORDS_END:
 TOKEN_TABLE_END:
     data 0x00
 
@@ -4482,8 +4403,7 @@ TOKEN_KEYWORD_EMIT:
     cmp a, 0x83
     beq TOKEN_RAW
     cmp a, 0x8E
-    beq TOKEN_RAW
-    jmp TOKEN_NEXT
+    bne TOKEN_NEXT
 TOKEN_RAW:
     ld a, (gh)
     call TOKEN_EMIT
@@ -4493,8 +4413,7 @@ TOKEN_RAW:
     ret
 TOKEN_WORD:
     call WORD_CHAR
-    bne TOKEN_WORD_MORE
-    jmp TOKEN_NEXT
+    beq TOKEN_NEXT
 TOKEN_WORD_MORE:
     call TOKEN_EMIT
     inc gh
@@ -4985,6 +4904,12 @@ DETOKEN_FOUND:
     beq DETOKEN_KEYWORD_SPACE
     cmp b, 0x9E
     beq DETOKEN_KEYWORD_SPACE
+VIDEO_SPACING_START:
+    cmp b, 0xA9
+    bcc VIDEO_SPACING_END
+    cmp b, 0xAD
+    bcc DETOKEN_KEYWORD_SPACE
+VIDEO_SPACING_END:
     cmp b, 0xA7
     beq DETOKEN_KEYWORD_SPACE
     cmp b, 0xA8
@@ -5344,3 +5269,95 @@ REVERSE_BYTES:
     jmp REVERSE_BYTES
 REVERSE_DONE:
     ret
+
+; Capacity prototype, appended to native BASIC by build.py. Not shipped ROM.
+; Reuses EXPR, EOL, BINARY_COMMA, REPORT_ERROR; no new RAM scratch.
+VIDEO_SCREEN:
+    ld ef, 0x0002
+    call VIDEO_ARGUMENT
+    push ab
+    call EOL
+    pop ab
+    ld 0xFF30, b
+    ret
+VIDEO_COLOR:
+    ld ef, 0x0010
+    call VIDEO_ARGUMENT
+    push ab
+    call BINARY_COMMA
+    call VIDEO_ARGUMENT
+    push ab
+    call EOL
+    pop ab
+    pop cd
+    ld 0xFF34, d
+    ld 0xFF35, b
+    ret
+VIDEO_PLOT:
+    ld ef, 0x00A0
+    call VIDEO_ARGUMENT
+    push ab
+    call BINARY_COMMA
+    ld ef, 0x0060
+    call VIDEO_ARGUMENT
+    push ab
+    call EOL
+    ld cd, 0xFF30
+    ld a, (cd)
+    and a, 0x01
+    cmp a, 0x01
+    bne VIDEO_ILLEGAL
+    pop ab
+    pop cd
+    ld 0xFF36, d
+    ld 0xFF37, b
+    ld a, 0x01
+    ld 0xFF3A, a
+    ret
+VIDEO_ARGUMENT:
+    call EXPR
+    cmp ab, ef
+    bcc VIDEO_ARGUMENT_OK
+VIDEO_ILLEGAL:
+    ld cd, VIDEO_ILLEGAL_TEXT
+    jmp REPORT_ERROR
+VIDEO_ARGUMENT_OK:
+    ret
+VIDEO_ILLEGAL_TEXT:
+    data "? ILLEGAL QUANTITY", 0x00
+VIDEO_CLS:
+    call EOL
+    ld cd, 0xFF30
+    ld a, (cd)
+    and a, 0x01
+    ld b, a
+    ld a, 0x00
+    ld 0xFF31, a
+    ld 0xFF32, a
+    cmp b, 0x00
+    beq VIDEO_CLS_TEXT
+    ld ef, 0x0F00
+VIDEO_CLS_PICTURE_LOOP:
+    ld 0xFF33, a
+    dec ef
+    bne VIDEO_CLS_PICTURE_LOOP
+    ret
+VIDEO_CLS_TEXT:
+    ld cd, 0xFF35
+    ld a, (cd)
+    shl a, 0x04
+    ld b, a
+    dec cd
+    ld a, (cd)
+    clc
+    add a, b
+    ld b, a
+    ld ef, 0x03C0
+VIDEO_CLS_TEXT_LOOP:
+    ld a, 0x20
+    ld 0xFF33, a
+    ld 0xFF33, b
+    dec ef
+    bne VIDEO_CLS_TEXT_LOOP
+    ret
+VIDEO_END:

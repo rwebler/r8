@@ -7,6 +7,7 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use anyhow::{Context as _, Result, bail, ensure};
 use core::cell::RefCell;
+use std::rc::Rc;
 #[path = "basic_tokens.rs"]
 mod tokens;
 use std::io::{BufRead, Read as _, Write};
@@ -22,6 +23,12 @@ fn binary_capacity(address: u16) -> Result<usize> {
 
 /// BASIC program storage, signed 16-bit integers, arrays, and ASCII strings.
 pub struct Basic {
+    #[cfg(feature = "live")]
+    pub live_clock: Option<std::rc::Rc<std::cell::RefCell<crate::live::LiveClock>>>,
+    /// Video register state shared with the reference runner.
+    pub video: Rc<RefCell<crate::video::Video>>,
+    /// Sound register state shared with the reference runner.
+    pub sound: Rc<RefCell<crate::sound::Sound>>,
     random: RefCell<Option<crate::random::RandomDevice>>,
     pool: RefCell<StringPool>,
     string_arrays: BTreeMap<String, Vec<String>>,
@@ -38,6 +45,10 @@ pub struct Basic {
 impl Default for Basic {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "live")]
+            live_clock: None,
+            video: Rc::new(RefCell::new(crate::video::Video::default())),
+            sound: Rc::new(RefCell::new(crate::sound::Sound::default())),
             random: RefCell::new(None),
             pool: RefCell::new(StringPool::default()),
             string_arrays: BTreeMap::new(),
@@ -49,6 +60,14 @@ impl Default for Basic {
             lines: tokens::Program::default(),
             vars: BTreeMap::new(),
         }
+    }
+}
+
+impl Basic {
+    /// Advances video and sound without executing a BASIC statement.
+    pub fn advance_devices(&mut self, ticks: u64) {
+        self.video.borrow_mut().advance(ticks);
+        self.sound.borrow_mut().advance(ticks);
     }
 }
 
@@ -147,6 +166,8 @@ impl StringPool {
 }
 
 struct Parser<'source> {
+    video: &'source RefCell<crate::video::Video>,
+    sound: &'source RefCell<crate::sound::Sound>,
     random: &'source RefCell<Option<crate::random::RandomDevice>>,
     pool: &'source RefCell<StringPool>,
     string_arrays: &'source BTreeMap<String, Vec<String>>,
@@ -528,10 +549,16 @@ impl Parser<'_> {
                 let address = self.address()?;
                 ensure!(self.symbol(')'), "expected )");
                 let byte = self
-                    .random
+                    .video
                     .borrow_mut()
-                    .as_mut()
-                    .and_then(|device| device.read(address))
+                    .read(address)
+                    .or_else(|| self.sound.borrow().read(address))
+                    .or_else(|| {
+                        self.random
+                            .borrow_mut()
+                            .as_mut()
+                            .and_then(|device| device.read(address))
+                    })
                     .unwrap_or_else(|| self.memory.get(&address).copied().unwrap_or_default());
                 i16::from(byte)
             }
@@ -702,6 +729,8 @@ impl Basic {
         let mut pos = 0;
         loop {
             let mut parser = Parser {
+                video: &self.video,
+                sound: &self.sound,
                 random: &self.random,
                 pool: &self.pool,
                 string_arrays: &self.string_arrays,
@@ -811,6 +840,18 @@ impl Basic {
         self.pool.borrow_mut().begin();
         let result = self.statement_body(tokens, input, output);
         self.pool.borrow_mut().temporaries.clear();
+        #[cfg(not(feature = "live"))]
+        self.advance_devices(1000);
+        #[cfg(feature = "live")]
+        if let Some(clock) = &self.live_clock {
+            let mut clock = clock.borrow_mut();
+            clock.pump();
+            if clock.stopped() {
+                return Ok(Flow::End);
+            }
+        } else {
+            self.advance_devices(1000);
+        }
         result
     }
     #[expect(
@@ -824,6 +865,8 @@ impl Basic {
         output: &mut impl Write,
     ) -> Result<Flow> {
         let mut parser = Parser {
+            video: &self.video,
+            sound: &self.sound,
             random: &self.random,
             pool: &self.pool,
             string_arrays: &self.string_arrays,
@@ -886,14 +929,74 @@ impl Basic {
             ensure!(parser.symbol(','), "expected comma");
             let value = u8::try_from(parser.expression()?).context("byte out of range")?;
             parser.end()?;
-            if !self
-                .random
-                .borrow_mut()
-                .as_mut()
-                .is_some_and(|device| device.write(address, value))
+            if !self.video.borrow_mut().write(address, value)
+                && !self.sound.borrow_mut().write(address, value)
+                && !self
+                    .random
+                    .borrow_mut()
+                    .as_mut()
+                    .is_some_and(|device| device.write(address, value))
             {
                 self.memory.insert(address, value);
             }
+            return Ok(Flow::Next);
+        }
+        if parser.word("SCREEN") {
+            let mode = parser.expression()?;
+            parser.end()?;
+            ensure!((0..=1).contains(&mode), "ILLEGAL QUANTITY");
+            self.video.borrow_mut().write(0xff30, mode as u8);
+            return Ok(Flow::Next);
+        }
+        if parser.word("CLS") {
+            parser.end()?;
+            let mut video = self.video.borrow_mut();
+            let mode = video.read(0xff30).unwrap_or_default() & 1;
+            video.write(0xff31, 0);
+            video.write(0xff32, 0);
+            if mode == 0 {
+                let attr = (video.read(0xff35).unwrap_or_default() << 4)
+                    | video.read(0xff34).unwrap_or_default();
+                for _ in 0..960 {
+                    video.write(0xff33, 0x20);
+                    video.write(0xff33, attr);
+                }
+            } else {
+                for _ in 0..3840 {
+                    video.write(0xff33, 0);
+                }
+            }
+            return Ok(Flow::Next);
+        }
+        if parser.word("COLOR") {
+            let ink = parser.expression()?;
+            ensure!(parser.symbol(','), "expected comma");
+            let paper = parser.expression()?;
+            parser.end()?;
+            ensure!(
+                (0..=15).contains(&ink) && (0..=15).contains(&paper),
+                "ILLEGAL QUANTITY"
+            );
+            let mut video = self.video.borrow_mut();
+            video.write(0xff34, ink as u8);
+            video.write(0xff35, paper as u8);
+            return Ok(Flow::Next);
+        }
+        if parser.word("PLOT") {
+            let x = parser.expression()?;
+            ensure!(parser.symbol(','), "expected comma");
+            let y = parser.expression()?;
+            parser.end()?;
+            let mut video = self.video.borrow_mut();
+            ensure!(
+                (0..160).contains(&x)
+                    && (0..96).contains(&y)
+                    && video.read(0xff30).unwrap_or_default() & 1 == 1,
+                "ILLEGAL QUANTITY"
+            );
+            video.write(0xff36, x as u8);
+            video.write(0xff37, y as u8);
+            video.write(0xff3a, 1);
             return Ok(Flow::Next);
         }
         if parser.word("DATA") {
@@ -1333,6 +1436,11 @@ impl Basic {
                 writeln!(
                     output,
                     "PEEK(address), POKE address,byte: reference memory plus optional random device; use --native for RX-82 RAM"
+                )?;
+                writeln!(output, "SCREEN 0/1; CLS; COLOR ink,paper; PLOT x,y")?;
+                writeln!(
+                    output,
+                    "PRINT stays serial; video FF30-FF3F and sound FF40-FF47 use PEEK/POKE"
                 )?;
                 writeln!(
                     output,

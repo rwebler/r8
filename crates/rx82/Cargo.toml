@@ -19,6 +19,7 @@ maintenance = { status = "actively-developed" }
 
 [features]
 states = []
+live = []
 
 [dependencies]
 anyhow = { workspace = true }
