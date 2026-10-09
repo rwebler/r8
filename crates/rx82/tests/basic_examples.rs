@@ -53,28 +53,21 @@ fn check_example(source: &str, input: &str, expected: &str, variables: &[(u8, i1
     reason = "separate source RAM inspection from execution"
 )]
 fn inspect_program(sys: &System, source: &str) {
-    for (index, line) in source.lines().enumerate() {
-        let (number, text) = line.split_once(' ').unwrap();
-        let address = 0x1000_u16.strict_add(u16::try_from(index).unwrap().strict_mul(128));
-        let actual_number =
-            u16::from_le_bytes([sys.mem.get(address), sys.mem.get(address.strict_add(1))]);
+    let mut reference = Basic::default();
+    reference.load(source).unwrap();
+    for (offset, &byte) in reference.program_image().iter().enumerate() {
+        let address = 0x1000_u16.strict_add(u16::try_from(offset).unwrap());
         assert_eq!(
-            actual_number,
-            number.parse::<u16>().unwrap(),
-            "guest line number at {address:04X}"
+            sys.mem.get(address),
+            byte,
+            "guest token chain at {address:04X}"
         );
-        for (offset, byte) in text.bytes().chain([0]).enumerate() {
-            assert_eq!(
-                sys.mem.get(
-                    address
-                        .strict_add(2)
-                        .strict_add(u16::try_from(offset).unwrap())
-                ),
-                byte,
-                "guest source record {number}, byte {offset}"
-            );
-        }
     }
+    assert_eq!(
+        u16::from_le_bytes([sys.mem.get(0x86), sys.mem.get(0x87)]),
+        reference.program_end(),
+        "guest end marker address"
+    );
 }
 
 #[test]

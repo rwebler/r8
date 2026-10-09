@@ -167,8 +167,8 @@ allocates the replacement before releasing the old string. Consequently a
 store can report `STRING SPACE` even if the final values alone would fit.
 Failed stores retain the old value. Freed records are reused, and compaction
 runs between statements when no temporaries remain. `PRINT` and `LEN` release
-results without storing them. Program records remain 128 bytes, so long values
-must be built with `+` or supplied to string INPUT (up to 255 characters).
+results without storing them. String literals and string INPUT accept up to 255 characters. Packed program
+lines have no fixed record size.
 
 String functions use one-based character positions and accept expressions in all
 arguments. Function names are case insensitive.
@@ -322,11 +322,11 @@ PRINT A
 This reads A's little-endian bytes (52 and 18), then changes A to 4728.
 `POKE 65282,65` writes `A` to the console output register. Reading the console
 input register with `PEEK(65281)` consumes one input byte. ROM writes have no
-effect. Writes to interpreter storage, source records, or the stack change the
+effect. Writes to interpreter storage, tokenized program lines, or the stack change the
 running machine and can disrupt it. The unused RAM at `0100`–`01FF` (decimal
 256–511) is suitable for small memory experiments; see [memory.bas](examples/memory.bas).
 
-The Rust reference interpreter provides its own zero-filled 64 KiB byte
+The Rust reference interpreter provides its own 64 KiB byte
 address space. It has no emulated CPU, ROM, or BASIC variable mapping; when
 enabled, the random device occupies its register addresses in this space:
 `POKE 768,...` there does not change A. Reference bytes persist across `RUN`,
@@ -388,7 +388,7 @@ cargo run -p rx82 -- basic --native --break-before-run program.bas
 
 `--step` opens the monitor at BASIC ROM entry (`C100`), before the source is loaded.
 `--break-before-run` first lets the ROM consume the numbered source file, then
-opens the monitor with records loaded and `RUN` queued but not executed. Use
+opens the monitor with the token chain loaded and `RUN` queued but not executed. Use
 `M 1000` to inspect source, `M 0300` to inspect variables, and `G` to continue.
 The preload mode rejects unnumbered commands and reports ROM loading errors;
 it has a 20-million-cycle loading limit.
@@ -413,20 +413,21 @@ reports a specific cause and returns to the prompt. Errors raised during `RUN`
 include the current BASIC line number; direct-mode errors omit it.
 
 Native resource limits: variables are single letters A–Z, reset to zero on
-`RUN`; line numbers are 1–65535; source lines are limited to 122 bytes; storage
-has 256 fixed-size records; 64 subroutine frames and 48 loop frames fit in RAM.
+`RUN`; line numbers are 1–65535; program storage is a packed 32 KiB token chain
+with no fixed line count; 64 subroutine frames and 48 loop frames fit in RAM.
 `FOR`/`NEXT` must be standalone statements. Loop matching occurs when the `FOR`
 is executed, rather than the reference interpreter's whole-program precheck.
 `NEXT` detects missing or mismatched active loops. A `GOTO` outside a loop
 discards its frame; subroutines preserve caller loops and discard local loops
 on return. `SAVE`/`LOAD` operate at the prompt using quoted host filenames, preserving
 spaces and case. `SAVE` writes sorted numbered text and replaces an existing
-file on close. `LOAD` validates numbering, control bytes, line lengths, and the
-256-nonblank-line limit before replacing program records and clearing variables.
+file on close. `LOAD` validates numbering, tokens, control bytes, and the packed byte budget
+before replacing the chain and clearing variables.
 A failed validation or open leaves the old program and variables intact.
 Statement syntax is checked during execution. Blank lines, CRLF, and a missing
 final newline are accepted. Empty files clear the program. Files are limited
-to 64 KiB by the byte-stream device.
+to 1 MiB by the byte-stream device, allowing detokenized source to exceed the
+32 KiB packed program window.
 
 Native and reference BASIC use the same text file format; programs must respect
 the native dialect's resource limits to run on both. For example:
@@ -461,12 +462,13 @@ Memory layout: console at `FF00`–`FF02`, BASIC code within `C100`–`EEFF`,
 original system firmware at `C000`–`C0FF`, reset vector at `FFFE`, and optional
 string RAM at `EF00`–`FEFF`. The BASIC frontend installs that RAM ahead of the
 stock ROM's zero padding. Ordinary machines retain the stock memory map.
-The line buffer is at `0200`, integer scalar words at `0300`–`0333`, string
+The entry and INPUT line buffer is at `0200`, integer scalar words at `0300`–`0333`, string
 scalar offsets at `0340`–`0373`, subroutine frames at `0400`–`04FF`, loop frames
 at `0500`–`07FF`, integer-array descriptors at `0800`–`0867`, string-array
-descriptors at `0870`–`08D7`, scratch at `0900`–`0FFF`, program records at
+descriptors at `0870`–`08D7`, token scratch at `0900`–`0DFF`, string scratch at `0E00`–`0FFF`, program lines at
 `1000`–`8FFF`, shared array elements at `9000`–`9FFF`, and the CPU stack at
-`A000`–`BFFF`.
+`A000`–`BFFF`. During entry, lexical items longer than 255 bytes spill to `A000`–`A3FF`; long
+numbered lines stage tokens beyond the old end marker until validation succeeds.
 
 Each array descriptor contains a little-endian absolute base and inclusive
 upper bound. Zero base means undeclared. Integer elements hold signed words;
@@ -482,9 +484,14 @@ The pool bump is at `00B2`, temporary top at `00B6`, and statement mark at
 `00B8`. Stable records grow upward from `EF00`; temporaries grow downward from
 `FF00`. Freed records start with zero followed by their former payload length.
 Compaction updates string references and ignores integer array words.
-Each 128-byte program record has a little-endian line number followed by
-NUL-terminated source; zero marks a free
-record. ROM source is `sys/basic_rom.asm`; rebuild its checked-in image with
+Each packed line contains a little-endian next address, a little-endian line
+number, and a NUL-terminated token stream. Binary numbers and length-prefixed
+strings can contain zero bytes inside their payloads. The chain starts at
+`1000`; a zero pointer ends it. `0086` holds the terminator address (`8FFE` at
+maximum capacity, leaving room for both zero bytes), `0084` is the execution
+cursor, and `00B0` remains the independent array bump. Edits slide the tail
+and repair links. `LIST` and `SAVE` detokenize; `.bas` files stay text. The
+keyword table in the ROM source also defines the host codec. ROM source is `sys/basic_rom.asm`; rebuild its checked-in image with
 `cargo run -p rx82 -- asm crates/rx82/sys/basic_rom.asm`. Tests verify image/source
 agreement, ROM size, output, and guest RAM contents.
 
@@ -535,10 +542,10 @@ The line suffix identifies the executing statement, not the missing target.
 | `FOR VARIABLE ALREADY ACTIVE` | Use distinct variables for nested loops. |
 | `RETURN WITHOUT GOSUB` | There is no subroutine return address. |
 | `UNDEFINED LINE` | A `GOTO`, `GOSUB`, or conditional jump target does not exist. |
-| `PROGRAM FULL` | All 256 program slots are occupied, or a loaded file exceeds the 256-nonblank-line limit. Delete lines before adding more. |
+| `PROGRAM FULL` | The edit or loaded source exceeds the 32 KiB packed program budget. The existing chain is retained. |
 | `GOSUB STACK FULL`, `FOR STACK FULL`, `EXPRESSION TOO DEEP` | Execution exhausted the corresponding stack limit. |
 | `INVALID LINE NUMBER` | A source line or target has an invalid number, including zero. |
-| `LINE TOO LONG`, `INVALID CHARACTER` | Input exceeds 122 bytes or contains an unsupported control byte. |
+| `LINE TOO LONG`, `INVALID CHARACTER` | A line exceeds available staging space, or input contains an unsupported control byte. |
 | `INTEGER OVERFLOW`, `DIVISION BY ZERO` | Arithmetic exceeded its range or divided by zero. |
 | `REQUIRES RUN`, `DIRECT MODE ONLY` | Use the statement in a stored program or at the prompt, respectively. |
 | `FOR/NEXT MUST STAND ALONE` | Put the loop statement on its own numbered line, outside `IF ... THEN`. |
