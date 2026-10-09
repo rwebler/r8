@@ -765,7 +765,7 @@ The following general-purpose traps are defined:
 | 9- | test a, N | test b, N | test c, N | test d, N | test e, N | test f, N | test g, N | test h, N | test ab, N | test cd, N | test ef, N | test gh, N | test sp, N | | | test R1, R2 |
 | A- | | | | | | | | | | | | | | | | |
 | B- | | | | | | | | | | | | | | | | |
-| C- | | | lsr R, S | lsr R1, R2 | | | | | | | | | | | | |
+| C- | shl R, S | shl R1, R2 | lsr R, S | lsr R1, R2 | | | | | | | | | | | | |
 | D- | push a | push b | push c | push d | push e | push f | push g | push h | push ab | push cd | push ef | push gh | push ps | | | |
 | E- | pop a | pop b | pop c | pop d | pop e | pop f | pop g | pop h | pop ab | pop cd | pop ef | pop gh | pop ps | | | |
 | F- | bra D | beq D | bne D | bcs D | bcc D | bmi D | bpl D | jmp NN | call NN | trap T | | | | | | |
@@ -787,7 +787,7 @@ If you're interested in writing an emulator, though, it's much easier to get sta
 
 # Changelog
 
-* **0.6.0** — split into assembler / core / emulator crates, `lsr`, `and R, N`, `add R, N`, `sub R, N`, `jmp NN`, `bcc` / `bcs`, `sec / clc`, `include`, turbo mode, ROM improvements
+* **0.6.0** — split into assembler / core / emulator crates, `lsr`, `shl`, `and R, N`, `add R, N`, `sub R, N`, `jmp NN`, `bcc` / `bcs`, `sec / clc`, `include`, turbo mode, ROM improvements
 * **0.5.0** — `org` and `data` directives, traps implemented, `trap`, `rti`, `call`, `ret`, `ld (RR), R`, `ld R1, R2`, `push`, `pop`, `inc/dec (RR)`, `inc/dec (NN)`, `bra` instructions, reset vector, stack pointer, ROM binary, forward labels
 * **0.4.0** — `beq`, `bne`, `inc`, `dec`, and `cmp` instructions; zero and carry flags; backward labels, comments
 * **0.3.0** — all registers, load immediate and store direct instructions
