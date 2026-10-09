@@ -214,7 +214,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Vec<Token>> {
             0xb3..=0xb5 => {
                 out.push(Token::Comparison(byte));
             }
-            0x80..=0xa8 => {
+            0x80..=0xac => {
                 let (_, word) = keywords()
                     .find(|&(code, _)| code == byte)
                     .context("invalid token")?;
@@ -289,7 +289,7 @@ pub(super) fn text(bytes: &[u8]) -> Result<String> {
                 0xb4 => "<=",
                 _ => ">=",
             }),
-            0x80..=0xa8 => {
+            0x80..=0xac => {
                 let (_, word) = keywords()
                     .find(|&(code, _)| code == byte)
                     .context("invalid token")?;
@@ -306,7 +306,7 @@ pub(super) fn text(bytes: &[u8]) -> Result<String> {
                     break;
                 }
                 if bytes.get(pos) != Some(&0)
-                    && (byte < 0x9a || matches!(byte, 0x9c | 0x9e | 0xa7 | 0xa8))
+                    && (byte < 0x9a || matches!(byte, 0x9c | 0x9e | 0xa7..=0xac))
                 {
                     out.push(' ');
                 }

@@ -6,6 +6,7 @@ use r8asm::{assemble_with_debug, disassemble};
 use r8cpu::regs::Reg::*;
 
 use crate::{bus::Bus, clock::Clock, cpu::Cpu, memory::Memory, rom::Rom, state::State};
+use std::{cell::RefCell, rc::Rc};
 
 /// The RX82 ROM code.
 pub const ROM_DATA: &[u8] = include_bytes!("../sys/rx82_rom.bin");
@@ -51,6 +52,10 @@ pub struct Snapshot {
 /// cycle is actually due. Thus the clock can only slow down a speeding system, not
 /// speed up a slow one.
 pub struct System {
+    /// Shared video device for renderers and headless inspection.
+    pub video: Rc<RefCell<crate::video::Video>>,
+    /// Shared sound device for audio backends and headless inspection.
+    pub sound: Rc<RefCell<crate::sound::Sound>>,
     /// The system bus.
     pub bus: Bus,
     /// The system clock.
@@ -59,6 +64,8 @@ pub struct System {
     pub cpu: Cpu,
     /// Cycle counter.
     pub cycles: u16,
+    /// Non-wrapping device clock, independent of debug cycle numbering.
+    pub device_ticks: u64,
     /// Enable debug snapshots.
     pub debug: bool,
     /// Any attached devices, such as the [`Rom`].
@@ -76,11 +83,16 @@ pub struct System {
 impl Default for System {
     /// The default `System` has all-default devices.
     fn default() -> Self {
+        let video = Rc::new(RefCell::new(crate::video::Video::default()));
+        let sound = Rc::new(RefCell::new(crate::sound::Sound::default()));
         let mut sys = Self {
+            video: Rc::clone(&video),
+            sound: Rc::clone(&sound),
             bus: Bus::default(),
             clock: Box::new(Clock::default()),
             cpu: Cpu::default(),
             cycles: 0,
+            device_ticks: 0,
             debug: false,
             devices: Vec::new(),
             history: Vec::new(),
@@ -94,6 +106,8 @@ impl Default for System {
             end: 0xFFFF,
             data,
         };
+        sys.devices.push(Box::new(video));
+        sys.devices.push(Box::new(sound));
         sys.devices.push(Box::new(rom));
         sys
     }
@@ -203,13 +217,13 @@ impl System {
         // transaction, even when inspecting the same address repeatedly.
         self.bus.mem = false;
         self.bus.pending_write = None;
-        self.tick();
+        self.service_tick();
         self.bus.addr = addr;
         self.bus.mem = true;
         self.bus.write = false;
 
         // Tick the system once to fulfil the request
-        self.tick();
+        self.service_tick();
 
         // Restore the saved state
         self.cpu.halt = halted;
@@ -272,6 +286,19 @@ impl System {
 
     /// Advances the system by one clock cycle.
     pub fn tick(&mut self) {
+        self.service_tick();
+        self.advance_devices(1);
+    }
+
+    /// Advances device time without executing the CPU, for deterministic tests
+    /// and live terminal waits.
+    pub fn advance_devices(&mut self, ticks: u64) {
+        self.device_ticks = self.device_ticks.wrapping_add(ticks);
+        self.video.borrow_mut().advance(ticks);
+        self.sound.borrow_mut().advance(ticks);
+    }
+
+    fn service_tick(&mut self) {
         let state = self.cpu.state; // save before cpu.tick() overwrites it
         self.cpu.tick(&mut self.bus);
         for rom in &mut self.rom_modules {
@@ -369,7 +396,9 @@ mod tests {
         let module = r8asm::assemble_with_debug("org 0xD000\nld a, 0x2A\nhalt").unwrap();
         sys.install_rom(0xD000, &module).unwrap();
         for addr in 0xC000..=0xFFFF {
-            if !sys.rom_modules.iter().any(|rom| rom.in_range(addr)) {
+            if !sys.rom_modules.iter().any(|rom| rom.in_range(addr))
+                && !(0xFF30..=0xFF47).contains(&addr)
+            {
                 assert_eq!(
                     Some(sys.peek_mem(addr)),
                     ROM_DATA.get(usize::from(addr.strict_sub(0xC000))).copied()
