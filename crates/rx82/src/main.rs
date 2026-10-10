@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use std::{fs, path::PathBuf};
 
@@ -32,6 +32,12 @@ enum Command {
         /// Run the native R8 ROM interpreter.
         #[clap(long)]
         native: bool,
+        /// Select the reference interpreter for a live session.
+        #[clap(long, requires = "live", conflicts_with = "native")]
+        reference: bool,
+        /// Select video keyboard or terminal console for a live session.
+        #[clap(long, requires = "live", value_enum, default_value = "screen")]
+        console: ConsoleOption,
         /// Open the live video window and speaker (requires the live Cargo feature).
         #[clap(long)]
         live: bool,
@@ -88,6 +94,12 @@ enum Command {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ConsoleOption {
+    Screen,
+    Serial,
+}
+
 #[derive(Clone, Debug, Subcommand)]
 enum DocCommand {
     /// Generate opcode table.
@@ -124,6 +136,8 @@ fn main() -> Result<()> {
         Command::Basic {
             break_before_run,
             native,
+            reference,
+            console,
             live,
             turbo,
             path,
@@ -139,16 +153,26 @@ fn main() -> Result<()> {
                         "live mode does not combine with debugger options"
                     );
                     let source = path.map(fs::read_to_string).transpose()?;
-                    return if native {
-                        rx82::live::run_native(source, turbo, random)
+                    return if reference {
+                        let route = if console == ConsoleOption::Screen {
+                            rx82::native::ConsoleRoute::Screen
+                        } else {
+                            rx82::native::ConsoleRoute::Serial
+                        };
+                        rx82::live::run_reference(source, turbo, random, route)
                     } else {
-                        rx82::live::run_reference(source, turbo, random)
+                        let route = if console == ConsoleOption::Screen {
+                            rx82::native::ConsoleRoute::Screen
+                        } else {
+                            rx82::native::ConsoleRoute::Serial
+                        };
+                        rx82::live::run_native(source, turbo, random, route)
                     };
                 }
                 #[cfg(not(feature = "live"))]
                 anyhow::bail!("live mode requires building with --features live");
             }
-            let _ = turbo;
+            let _ = (turbo, reference, console);
             if native {
                 let source = path.map(fs::read_to_string).transpose()?;
                 if step || break_before_run {

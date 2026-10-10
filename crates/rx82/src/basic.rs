@@ -23,6 +23,8 @@ fn binary_capacity(address: u16) -> Result<usize> {
 
 /// BASIC program storage, signed 16-bit integers, arrays, and ASCII strings.
 pub struct Basic {
+    /// Optional retained text console for an interactive reference session.
+    pub screen_console: Option<Rc<RefCell<crate::screen_console::ScreenConsole>>>,
     #[cfg(feature = "live")]
     pub live_clock: Option<std::rc::Rc<std::cell::RefCell<crate::live::LiveClock>>>,
     /// Video register state shared with the reference runner.
@@ -45,6 +47,7 @@ pub struct Basic {
 impl Default for Basic {
     fn default() -> Self {
         Self {
+            screen_console: None,
             #[cfg(feature = "live")]
             live_clock: None,
             video: Rc::new(RefCell::new(crate::video::Video::default())),
@@ -846,7 +849,7 @@ impl Basic {
         if let Some(clock) = &self.live_clock {
             let mut clock = clock.borrow_mut();
             clock.pump();
-            if clock.stopped() {
+            if clock.stopped() || clock.take_break() {
                 return Ok(Flow::End);
             }
         } else {
@@ -955,6 +958,9 @@ impl Basic {
             video.write(0xff31, 0);
             video.write(0xff32, 0);
             if mode == 0 {
+                if let Some(screen) = &self.screen_console {
+                    screen.borrow_mut().reset_cursor();
+                }
                 let attr = (video.read(0xff35).unwrap_or_default() << 4)
                     | video.read(0xff34).unwrap_or_default();
                 for _ in 0..960 {
@@ -1199,6 +1205,7 @@ impl Basic {
             let index = parser.subscript(&name)?;
             let value = if read {
                 parser.end()?;
+                let restore_picture = self.begin_screen_input();
                 write!(output, "? ")?;
                 output.flush()?;
                 let mut line = String::new();
@@ -1211,6 +1218,7 @@ impl Basic {
                 }
                 check_string(&line)?;
                 self.pool.borrow_mut().push(line.len())?;
+                self.end_screen_input(restore_picture);
                 line
             } else {
                 ensure!(parser.symbol('='), "expected =");
@@ -1224,11 +1232,14 @@ impl Basic {
         let index = parser.subscript(&name)?;
         let value = if read {
             parser.end()?;
+            let restore_picture = self.begin_screen_input();
             write!(output, "? ")?;
             output.flush()?;
             let mut line = String::new();
             ensure!(input.read_line(&mut line)? != 0, "end of input");
-            line.trim().parse().context("expected integer")?
+            let value = line.trim().parse().context("expected integer")?;
+            self.end_screen_input(restore_picture);
+            value
         } else {
             ensure!(parser.symbol('='), "expected =");
             let value = parser.expression()?;
@@ -1373,8 +1384,29 @@ impl Basic {
     /// # Errors
     /// Returns terminal input/output errors; BASIC errors are printed at the prompt.
     pub fn interact(&mut self, input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
-        writeln!(output, "RX-82 BASIC\nType HELP for commands.\nReady.")?;
+        self.interact_inner(input, output, true)
+    }
+    /// Continue an interactive session after a preloaded program runs.
+    pub fn interact_after_load(
+        &mut self,
+        input: &mut impl BufRead,
+        output: &mut impl Write,
+    ) -> Result<()> {
+        self.interact_inner(input, output, false)
+    }
+    fn interact_inner(
+        &mut self,
+        input: &mut impl BufRead,
+        output: &mut impl Write,
+        banner: bool,
+    ) -> Result<()> {
+        if banner {
+            writeln!(output, "RX-82 BASIC\nType HELP for commands.\nReady.")?;
+        }
         loop {
+            if let Some(screen) = &self.screen_console {
+                screen.borrow_mut().reveal();
+            }
             write!(output, "> ")?;
             output.flush()?;
             let mut line = String::new();
@@ -1391,6 +1423,27 @@ impl Basic {
             }
         }
         Ok(())
+    }
+    fn begin_screen_input(&self) -> Option<u16> {
+        if let Some(screen) = &self.screen_console {
+            let video = self.video.borrow();
+            let pointer = (video.mode == 1).then_some(video.pointer);
+            drop(video);
+            if pointer.is_some() {
+                screen.borrow_mut().reveal();
+            }
+            pointer
+        } else {
+            None
+        }
+    }
+    fn end_screen_input(&self, pointer: Option<u16>) {
+        if let Some(pointer) = pointer {
+            let mut video = self.video.borrow_mut();
+            video.write(0xff30, 1);
+            video.write(0xff31, pointer as u8);
+            video.write(0xff32, (pointer >> 8) as u8);
+        }
     }
     fn command(
         &mut self,

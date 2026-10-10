@@ -14,6 +14,7 @@ pub mod monitor;
 pub mod native;
 pub mod random;
 pub mod rom;
+pub mod screen_console;
 pub mod sound;
 pub mod state;
 pub mod system;

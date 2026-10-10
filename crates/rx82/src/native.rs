@@ -13,6 +13,19 @@ use std::io::{BufRead, Write};
 pub const ROM: &[u8] = include_bytes!("../sys/basic_rom.bin");
 /// Entry address of the optional BASIC extension ROM.
 pub const ROM_START: u16 = 0xC100;
+/// Guest recovery and emitter addresses verified against assembly symbols in tests.
+pub const SCREEN_EMIT_START: u16 = 0xECC0;
+pub const SCREEN_EMIT_END: u16 = 0xED99;
+pub const SCREEN_BREAK: u16 = 0xEEE5;
+
+/// Native BASIC character transport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsoleRoute {
+    /// FF00-FF02 terminal transport.
+    Serial,
+    /// Retained 40 by 24 video text page and interactive editor.
+    Screen,
+}
 
 /// Creates a machine paused at the BASIC extension entry point.
 ///
@@ -24,6 +37,16 @@ pub const ROM_START: u16 = 0xC100;
     reason = "bundled ROM layout is verified by tests"
 )]
 pub fn machine() -> (System, Rc<RefCell<ConsoleState>>) {
+    machine_with_console(ConsoleRoute::Serial)
+}
+
+/// Creates a native machine with an explicit console route.
+#[must_use]
+#[expect(
+    clippy::expect_used,
+    reason = "bundled ROM layout is verified by tests"
+)]
+pub fn machine_with_console(route: ConsoleRoute) -> (System, Rc<RefCell<ConsoleState>>) {
     let console = Console::default();
     let shared = Rc::clone(&console.shared);
     let mut sys = System {
@@ -45,6 +68,7 @@ pub fn machine() -> (System, Rc<RefCell<ConsoleState>>) {
         .expect("valid BASIC ROM module");
     sys.enter_rom(ROM_START)
         .expect("installed BASIC ROM module");
+    sys.mem.set(0x00F3, u8::from(route == ConsoleRoute::Serial));
     (sys, shared)
 }
 
@@ -180,6 +204,195 @@ pub fn debug(source: &str, break_before_run: bool) -> Result<()> {
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+    #[test]
+    fn screen_hook_addresses_match_assembly() {
+        use r8asm::asm::{Assembler, Tokenizer};
+        let source = include_str!("../sys/basic_rom.asm");
+        let mut assembler = Assembler::new(Tokenizer::new(source).tokenize().unwrap());
+        assembler.assemble().unwrap();
+        assert_eq!(assembler.labels["SC_OUTPUT"], SCREEN_EMIT_START);
+        assert_eq!(assembler.labels["SC_EDIT_START"], SCREEN_EMIT_END);
+        assert_eq!(assembler.labels["SC_BREAK"], SCREEN_BREAK);
+    }
+    #[test]
+    fn screen_editor_and_picture_input_restore() {
+        let (mut sys, shared) = machine_with_console(ConsoleRoute::Screen);
+        shared.borrow_mut().input.extend(
+            b"10 SCREEN 1\n20 PLOT 0,0\n30 INPUT A\n40 PRINT A\n50 END\nRUN\n4x\x08\x082\nQUIT\n",
+        );
+        let mut restored_during_run = false;
+        for _ in 0..20_000_000 {
+            if sys.cpu.halt {
+                break;
+            }
+            sys.tick();
+            if sys.mem.get(0x0082) == 1
+                && sys.video.borrow().mode == 1
+                && (sys.mem.get(0x0300) == 2 || sys.mem.get(0x0301) == 2)
+            {
+                restored_during_run = true;
+            }
+        }
+        assert!(sys.cpu.halt, "guest stalled at {:04X}", sys.cpu.pc);
+        let video = sys.video.borrow();
+        let text: String = video
+            .text
+            .chunks_exact(2)
+            .map(|cell| char::from(cell[0]))
+            .collect();
+        assert!(text.contains("? 2"), "{text}");
+        assert!(text.contains("2"), "{text}");
+        assert_eq!(video.mode, 0);
+        assert_eq!(video.picture[0], 0x40);
+        assert!(
+            restored_during_run,
+            "A={:02X}{:02X}",
+            sys.mem.get(0x0300),
+            sys.mem.get(0x0301)
+        );
+        assert!(shared.borrow().output.is_empty());
+    }
+    #[test]
+    fn screen_break_recovers_guest_program_and_prompt() {
+        let (mut sys, shared) = machine_with_console(ConsoleRoute::Screen);
+        shared.borrow_mut().input.extend(b"10 GOTO 10\nRUN\n");
+        for _ in 0..2_000_000 {
+            sys.tick();
+            if sys.mem.get(0x0082) == 1 && sys.cpu.state == crate::state::State::FetchOpcode {
+                break;
+            }
+        }
+        assert_eq!(sys.mem.get(0x0082), 1);
+        sys.cpu.pc = SCREEN_BREAK;
+        shared.borrow_mut().input.extend(b"LIST\nQUIT\n");
+        for _ in 0..5_000_000 {
+            if sys.cpu.halt {
+                break;
+            }
+            sys.tick();
+        }
+        assert!(sys.cpu.halt);
+        let text: String = sys
+            .video
+            .borrow()
+            .text
+            .chunks_exact(2)
+            .map(|cell| char::from(cell[0]))
+            .collect();
+        assert!(text.contains("10 GOTO 10"), "{text}");
+        assert_eq!(sys.mem.get(0x0082), 0);
+    }
+    #[test]
+    fn screen_preload_is_silent_and_returns_to_prompt() {
+        let (mut sys, shared) = machine_with_console(ConsoleRoute::Screen);
+        sys.mem.set(0x00F9, 2);
+        shared
+            .borrow_mut()
+            .input
+            .extend(b"10 PRINT 7\n20 END\nRUN\n");
+        let mut ran = false;
+        for _ in 0..5_000_000 {
+            sys.tick();
+            ran |= sys.mem.get(0x0082) == 1;
+            if ran && sys.mem.get(0x00F9) == 2 {
+                sys.mem.set(0x00F9, 0);
+            }
+            if ran && sys.mem.get(0x0082) == 0 && shared.borrow().waiting {
+                break;
+            }
+        }
+        assert!(ran);
+        let text: String = sys
+            .video
+            .borrow()
+            .text
+            .chunks_exact(2)
+            .map(|cell| char::from(cell[0]))
+            .collect();
+        assert!(text.contains("7"), "{text}");
+        assert!(!text.contains("RX-82"), "{text}");
+        assert!(text.contains(">"), "{text}");
+    }
+    #[test]
+    fn screen_overlong_input_is_rejected_without_committing_a_prefix() {
+        let (mut sys, shared) = machine_with_console(ConsoleRoute::Screen);
+        shared
+            .borrow_mut()
+            .input
+            .extend(format!("{}\nPRINT 9\nQUIT\n", "A".repeat(1025)).bytes());
+        for _ in 0..20_000_000 {
+            if sys.cpu.halt {
+                break;
+            }
+            sys.tick();
+        }
+        assert!(sys.cpu.halt);
+        let text: String = sys
+            .video
+            .borrow()
+            .text
+            .chunks_exact(2)
+            .map(|cell| char::from(cell[0]))
+            .collect();
+        assert!(text.contains("LINE TOO LONG"), "{text}");
+        assert!(text.contains("9"), "{text}");
+    }
+    #[test]
+    fn screen_backspace_after_scroll_keeps_cursor_in_text_page() {
+        let (mut sys, shared) = machine_with_console(ConsoleRoute::Screen);
+        let mut input = vec![b'A'; 1000];
+        input.extend(vec![8; 1001]);
+        input.extend(b"PRINT 5\nQUIT\n");
+        shared.borrow_mut().input.extend(input);
+        for _ in 0..50_000_000 {
+            if sys.cpu.halt {
+                break;
+            }
+            sys.tick();
+        }
+        assert!(sys.cpu.halt, "guest stalled at {:04X}", sys.cpu.pc);
+        let offset = u16::from(sys.mem.get(0x00F0)) | (u16::from(sys.mem.get(0x00F1)) << 8);
+        assert!(offset < 0x0780, "cursor escaped text page: {offset:04X}");
+        let text: String = sys
+            .video
+            .borrow()
+            .text
+            .chunks_exact(2)
+            .map(|cell| char::from(cell[0]))
+            .collect();
+        assert!(text.contains('5'), "{text}");
+    }
+    #[test]
+    fn native_and_reference_screen_output_agree_after_mode_changes() {
+        use crate::screen_console::{ScreenConsole, ScreenWriter};
+        let source = "10 CLS\n20 COLOR 2,4\n30 SCREEN 1\n40 PLOT 0,0\n50 PRINT \"HELLO\"\n60 SCREEN 0\n70 END";
+        let (mut sys, shared) = machine_with_console(ConsoleRoute::Screen);
+        shared
+            .borrow_mut()
+            .input
+            .extend(source.bytes().chain(b"\nRUN\nQUIT\n".iter().copied()));
+        for _ in 0..10_000_000 {
+            if sys.cpu.halt {
+                break;
+            }
+            sys.tick();
+        }
+        assert!(sys.cpu.halt);
+        let mut reference = crate::basic::Basic::default();
+        let screen = Rc::new(RefCell::new(ScreenConsole::new(Rc::clone(
+            &reference.video,
+        ))));
+        reference.screen_console = Some(Rc::clone(&screen));
+        reference.load(source).unwrap();
+        reference
+            .run(&mut b"".as_slice(), &mut ScreenWriter(screen))
+            .unwrap();
+        let native_video = sys.video.borrow();
+        let reference_video = reference.video.borrow();
+        assert_eq!(&native_video.text[..80], &reference_video.text[..80]);
+        assert_eq!(native_video.picture, reference_video.picture);
+        assert_eq!(native_video.mode, reference_video.mode);
+    }
     fn session(source: &str) -> (System, String) {
         session_with_budget(source, 5_000_000)
     }

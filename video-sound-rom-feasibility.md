@@ -2,6 +2,23 @@
 
 Assessment date: 2026-10-09. Contract: `video-sound-spec.md`.
 
+## Screen-console follow-up: measured output core
+
+On 2026-10-09 an isolated native output-console candidate assembled to **11,572
+bytes**, exclusive end **EE34**, leaving **204 bytes before EF00**. Net growth
+is **240 bytes**: 235 bytes of routines, 9 bytes of integration calls, and a
+4-byte HELP text saving. It keeps the existing memory map and uses four unused
+system RAM bytes for cursor position and serial/screen selection.
+
+Eleven native sessions passed against the actual video device, including exact
+scroll rows, picture retention, mode/pointer restoration, and SAVE serialization.
+This measures output, wrapping, scrolling, colors, serial selection and prompt
+return to text mode. Keyboard integration, input echo/editing and a visible
+cursor remain unmeasured; temporary video mode switching also needs live-frame
+assessment. It is not a claim that the complete interactive frontend fits or is
+ready to ship. Reproduction and limitations are in
+[`screen-console-budget/README.md`](crates/rx82/notes/screen-console-budget/README.md).
+
 ## Reduced milestone: measured fit
 
 **The restrained native interface fits the current ROM window.** A complete
