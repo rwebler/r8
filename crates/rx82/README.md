@@ -418,11 +418,11 @@ factorials, a multiplication table, and Euclid's GCD algorithm.
 
 ## Video and sound
 
-Both BASIC interpreters provide `SCREEN`, `CLS`, `COLOR`, and `PLOT`. `PRINT`
-always writes to the serial terminal; it never edits the display page. Text
-screens are built by writing character/attribute pairs to video RAM. For
-example, this writes `AB` to the first two cells with white ink on yellow
-paper while leaving terminal output separate:
+Both BASIC interpreters provide `SCREEN`, `CLS`, `COLOR`, and `PLOT`. A live
+screen session displays `PRINT`, prompts, `INPUT`, `LIST`, `HELP`, and errors on
+the retained text page. A serial session keeps that output in the terminal.
+Programs can still write character/attribute pairs directly to video RAM. For
+example, this writes `AB` to the first two cells with white ink on yellow paper:
 
 ```basic
 SCREEN 0
@@ -432,7 +432,7 @@ POKE 65331,65
 POKE 65331,113
 POKE 65331,66
 POKE 65331,113
-PRINT "caption in terminal"
+PRINT "caption"
 ```
 
 The 40 by 24 text page uses two bytes per cell and an 8 by 8 font. Character
@@ -488,21 +488,43 @@ live mode uses elapsed time instead. Native BASIC advances with CPU ticks.
 Build with SDL2 installed and open the live display and speaker with:
 
 ```sh
-cargo run -p rx82 --features live -- basic --live --native crates/rx82/examples/video_plot.bas
-cargo run -p rx82 --features live -- basic --live crates/rx82/examples/video_text.bas
+cargo run -p rx82 --features live -- basic --live crates/rx82/examples/screen_console.bas
+cargo run -p rx82 --features live -- basic --live --console serial crates/rx82/examples/video_text.bas
+cargo run -p rx82 --features live -- basic --live --reference
 ```
 
 The window uses integer nearest-neighbor scaling and letterboxing. Audio can
 be unavailable while video remains usable. `--turbo` runs without audio and
-drops stale frames. Closing the window, QUIT, or terminal EOF ends a live
-session. The headless build does not need SDL2.
+drops stale frames. `basic --live` runs native BASIC with window keyboard input;
+`--reference` selects the Rust interpreter, and `--console serial` retains
+terminal input/output alongside the window. `--native` and `--reference` cannot
+be combined. `--console screen` requires `--live`. The headless `basic` and
+`basic --native` commands remain serial. Closing the window or `QUIT` ends a
+screen session; terminal EOF ends a serial session. The headless build does not
+need SDL2.
+
+Screen output is 40 columns by 24 rows. A character in column 40 wraps
+immediately; a following LF advances another line. LF clears the rest of its
+row with current colors, CR is ignored, and TAB is one space. Scrolling moves
+both glyphs and attributes. `CLS` in text mode resets the text cursor; `CLS`
+in picture mode clears only the picture. `SCREEN` preserves both pages and the
+text cursor. Output while a picture is shown updates the hidden text page.
+`INPUT` reveals that text page and restores the picture after valid input.
+Completion, STOP, Ctrl-C, and errors return to the text prompt. Keyboard editing
+supports printable ASCII, Enter, and Backspace across wrapped lines; Backspace
+stops at the current prompt or input question. A screen input line accepts up
+to 1024 bytes; a longer line is rejected with `LINE TOO LONG` and drained
+through Enter. Paste input is queued with a bounded buffer; if that buffer fills,
+the line is rejected with `LINE TOO LONG`. A visible cursor is drawn
+by the window renderer without changing video RAM. Screen source-file sessions
+load silently, run, and remain at the prompt.
 
 ## Native BASIC ROM
 
 `rx82 basic --native` enters an optional ROM module written in R8 assembly. The Rust
-interpreter remains the default/reference. Native parsing, line editing,
-variables, and statement execution happen on the emulated CPU; Rust only
-transports terminal bytes. `rx82 basic --native file.bas` types the file into
+interpreter remains the headless default/reference; `--live` defaults to native.
+Native parsing, line editing, variables, and statement execution happen on the
+emulated CPU. `rx82 basic --native file.bas` types the file into
 the guest console followed by `RUN` and `QUIT`.
 
 ```sh

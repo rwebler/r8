@@ -1,9 +1,11 @@
 # RX-82 video and sound implementation plan
 
-Status: steps 2–6 implemented on 2026-10-09; automated and dummy SDL checks
-passed. A physical window/speaker check remains environment dependent.
-The native BASIC ROM is 11,332 bytes (exclusive end ED44), leaving 444 bytes
-before EF00.
+Status: video/sound steps 2–6 implemented on 2026-10-09. The later
+`screen-console-plan.md` supersedes the serial-only BASIC output and absent
+cursor statements below. The current native BASIC ROM is 11,774 bytes
+(exclusive end EEFE); physical window/keyboard/audio validation remains open.
+The 11,332-byte ROM and 444-byte headroom cited in the historical measurements
+below describe the earlier video/sound milestone.
 This plan supersedes the broader implementation scope in the earlier frozen
 `video-sound-spec.md`. Retained device behavior follows that spec, subject to
 these explicit overrides. Deferred features are future enhancements, possibly

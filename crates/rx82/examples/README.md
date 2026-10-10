@@ -27,6 +27,7 @@ otherwise agree.
 | [multiplication.bas](multiplication.bas) | Nested loops, tab-separated `PRINT` | A 6 by 6 multiplication table |
 | [gcd.bas](gcd.bas) | Two inputs, integer division, conditionals, subroutines | Inputs 252 and 105 produce `GCD = 21` |
 | [video_text.bas](video_text.bas) | Raw text VRAM pairs, page retention, serial PRINT | AB appears in the window; captions remain in the terminal |
+| [screen_console.bas](screen_console.bas) | Picture, retained PRINT output, tone, prompt return | Picture and tone during RUN; text appears at END in a live screen session |
 | [video_plot.bas](video_plot.bas) | PLOT loops for an outline and diagonal | White drawing in picture mode |
 | [video_upload.bas](video_upload.bas) | Full 3840-byte READ/DATA picture upload with a live string | Checker pattern and a serial caption |
 | [video_file_stream.bas](video_file_stream.bas) | Native file-port streaming into FF33 | Loads [video_picture.bin](video_picture.bin); native mode only |

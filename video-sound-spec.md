@@ -1,8 +1,9 @@
 # RX-82 video and sound active specification
 
-The restrained milestone in `video-sound-plan.md` is authoritative. This file
-records the active device and BASIC contract. Earlier designs for text PRINT,
-LINE, SOUND, and external interrupts are in `video-sound-deferred.md`.
+The device milestone in `video-sound-plan.md` and the later
+`screen-console-plan.md` define the active behavior. This file records the
+device and BASIC contract. Earlier designs for LINE, SOUND, and external
+interrupts are in `video-sound-deferred.md`.
 
 Video and sound own their memory and registers. The 4 MHz system clock is
 independent of the 16-bit debug cycle counter. CPU reset does not reset the
@@ -47,7 +48,8 @@ writing X, Y, ink, or paper does not plot.
 Reset state: text mode, pointer/X/Y zero, ink 0, paper 7, slot 2 color 2, slot 3
 color 4. Thus the picture palette initially maps slots 0–3 to colors 7,0,2,4.
 Text RAM contains 960 `(20,70)` pairs and picture RAM contains 3840 zero bytes.
-There is no hardware or BASIC text cursor in this release.
+There is no hardware cursor register. BASIC keeps a software text cursor;
+the live renderer draws its visible input cursor without changing VRAM.
 
 ### Text page
 
@@ -200,8 +202,13 @@ report `? ILLEGAL QUANTITY`; syntax errors retain their existing diagnostic.
   slot 1 to FF3A. Preserve the palette and VRAM pointer.
 
 Keyword codes A9–AC are SCREEN, CLS, COLOR, PLOT. AD and AE remain unused.
-PRINT, prompts, INPUT, diagnostics, LIST, and HELP remain on the serial
-console in both modes. Text screens use raw VRAM character/attribute pairs.
+PRINT, prompts, INPUT, diagnostics, LIST, and HELP use the selected BASIC
+console. Live sessions default to a screen console; headless sessions and
+`--console serial` use the serial console. Screen output writes the retained
+40-by-24 text page, including while picture mode is displayed. INPUT reveals
+the text page and restores picture mode after valid input. Completion, STOP,
+break, and errors reveal the text prompt. Raw VRAM character/attribute access
+remains available.
 Pictures may be uploaded by READ/DATA or by file-port bytes streamed into
 FF33. BLOAD remains RAM-only.
 
@@ -211,7 +218,7 @@ The `live` Cargo feature enables SDL2 video/audio through `basic --live`, for
 native or reference BASIC. Window resizing uses integer nearest-neighbor
 scaling and letterboxing. Video works if audio hardware is unavailable, with
 a diagnostic. Audio queues are bounded; underruns play silence. Closing the
-window, terminal EOF, or QUIT ends the session. A debugger pause freezes
+window or QUIT ends a screen session; terminal EOF ends a serial session. A debugger pause freezes
 device time. Live turbo drops stale frames and silences audio.
 
 Check exact bus side effects, page retention, four pixel slots, block glyphs,

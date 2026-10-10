@@ -1,6 +1,9 @@
 # Deferred video and sound designs
 
-This is the broader 2026-10-09 design retained for future assessment. It is not the active release contract; see `video-sound-plan.md` and `video-sound-spec.md`.
+This is the broader 2026-10-09 design retained for future assessment. It is not
+the active release contract; see `video-sound-plan.md`, `video-sound-spec.md`,
+and `screen-console-plan.md`. Its serial-only and deferred cursor/scrolling
+statements are superseded by the screen console implementation.
 
 # RX-82 video and sound
 

@@ -17,9 +17,11 @@ BOOT:
     ld sp, 0xBFFF
     call NEW_PROGRAM
     call CLEAR_VARS
+    call SC_RESET
     ld cd, BANNER
     call PUTS
 PROMPT:
+    call SC_PROMPT
     ld ab, 0xFF00
     ld 0x00B6, b
     ld 0x00B7, a
@@ -1164,6 +1166,7 @@ READLINE_STRING:
     ld a, 0x01
     ld 0x00D0, a
 READLINE_START:
+    call SC_EDIT_START
     ld a, 0x01
     ld 0x00EE, a
     ld gh, 0x0200
@@ -1217,6 +1220,8 @@ READLINE_END:
     ld (gh), 0x00
     ret
 GETCHAR:
+    jmp SC_GET
+GETCHAR_RAW:
     push cd
     ld cd, 0x00A6
     ld a, (cd)
@@ -1256,7 +1261,7 @@ LONG_828:
     call FILE_CHECK
     jmp PUTCHAR_DONE
 PUTCHAR_CONSOLE:
-    ld 0xFF02, a
+    call SC_OUTPUT
 PUTCHAR_DONE:
     pop b
     pop cd
@@ -1559,6 +1564,7 @@ INPUT:
     beq INPUT_INTEGER
     jmp INPUT_STRING
 INPUT_INTEGER:
+    call SC_INPUT_BEGIN
     call LOCATION
     push cd
     call EOL
@@ -1575,6 +1581,7 @@ INPUT_INTEGER:
     pop cd
     ld (cd), b
     ld (cd+0x01), a
+    call SC_INPUT_END
     ret
 ; A lone unsigned literal can address any line. Expressions are signed 16-bit.
 TARGET:
@@ -2378,18 +2385,18 @@ HELP:
     jmp PUTS
 HELP_TEXT:
 VIDEO_HELP_START:
-    data "SCREEN 0/1; CLS; COLOR ink,paper; PLOT x,y", 0x0A
-    data "PRINT stays serial; video/sound ports: PEEK/POKE", 0x0A
+    data "SCREEN 0/1 CLS COLOR ink,paper PLOT x,y", 0x0A
+    data "Console output; video/sound: PEEK/POKE", 0x0A
 VIDEO_HELP_END:
-    data "RX-82 native ROM: numbered lines; LIST RUN NEW SAVE LOAD QUIT", 0x0A
-    data "BSAVE file,address,length; BLOAD file,address (quoted raw files)", 0x0A
-    data "Binary ranges: 0000-BFFF or EF00-FEFF; zero length allowed", 0x0A
-    data "LET PRINT INPUT IF THEN GOTO GOSUB RETURN FOR TO STEP NEXT END", 0x0A
-    data "A-Z variables, signed 16-bit integers, + - * / and parentheses", 0x0A
-    data "DIM A(100): indices 0..100; 2048 array elements total", 0x0A
-    data "A$..Z$: 255 ASCII characters, DIM A$(N), +, LEN; 4096-byte pool", 0x0A
-    data "DATA constants; READ A,A(I),A$; RESTORE [line]", 0x0A
-    data "PEEK(address), POKE address,byte: RX-82 RAM, ROM and devices", 0x0A
+    data "Lines: LIST RUN NEW SAVE LOAD QUIT", 0x0A
+    data "BSAVE file,address,length; BLOAD file,address", 0x0A
+    data "Binary 0000-BFFF EF00-FEFF", 0x0A
+    data "LET PRINT INPUT IF THEN GOTO GOSUB RETURN FOR NEXT END", 0x0A
+    data "A-Z signed: + - * / ()", 0x0A
+    data "DIM A(100): 0..100; 2048 array elements", 0x0A
+    data "A$..Z$: 255 ASCII; DIM A$(N), +, LEN; 4K pool", 0x0A
+    data "DATA; READ A,A(I),A$; RESTORE [line]", 0x0A
+    data "PEEK(address), POKE address,byte: memory and devices", 0x0A
     data "RND(n): 0..n-1; RANDOMIZE [seed] (requires --random-device)", 0x0A, 0x00
 
 ; Diagnostic handlers share stack reset, file abort, line context and prompt recovery.
@@ -3109,6 +3116,7 @@ ASSIGN_STRING_VALUE:
     pop ef
     jmp POOL_STORE
 INPUT_STRING:
+    call SC_INPUT_BEGIN
     call STRING_VARIABLE
     push cd
     call EOL
@@ -3130,6 +3138,7 @@ INPUT_STRING_END:
     ld (ef), 0x00
     call STACK_FROM_SCRATCH
     pop ef
+    call SC_INPUT_END
     jmp POOL_STORE
 PRINT_STACK_STRING:
     call STACK_TOP
@@ -4934,6 +4943,7 @@ DETOKEN_RAW:
 ; start at 0900 and large numbered lines spill beyond the old end marker.
 ; ED discards token bytes during LOAD validation; EE tracks an unfinished line.
 READ_TOKEN_LINE:
+    call SC_EDIT_START
     ld a, 0x00
     ld 0x00E6, a
     ld 0x00E7, a
@@ -5343,6 +5353,7 @@ VIDEO_CLS_PICTURE_LOOP:
     bne VIDEO_CLS_PICTURE_LOOP
     ret
 VIDEO_CLS_TEXT:
+    call SC_RESET
     ld cd, 0xFF35
     ld a, (cd)
     shl a, 0x04
@@ -5361,3 +5372,329 @@ VIDEO_CLS_TEXT_LOOP:
     bne VIDEO_CLS_TEXT_LOOP
     ret
 VIDEO_END:
+
+; Prototype scratch in unused system RAM: F0/F1 byte offset, F2 column,
+; F3 route (0 screen, nonzero serial). Host sets F3 before entry.
+SC_RESET:
+    push a
+    ld a, 0x00
+    ld 0x00F0, a
+    ld 0x00F1, a
+    ld 0x00F2, a
+    pop a
+    ret
+SC_PROMPT:
+    ld cd, 0x00F3
+    ld a, (cd)
+    cmp a, 0x00
+    bne SC_PROMPT_DONE
+    ld 0xFF30, a
+SC_PROMPT_DONE:
+    ret
+SC_OUTPUT:
+    push ab
+    push cd
+    push ef
+    push gh
+    ld cd, 0x00F3
+    ld b, (cd)
+    cmp b, 0x00
+    beq SC_SCREEN
+    ld 0xFF02, a
+    jmp SC_RETURN
+SC_SCREEN:
+    ld cd, 0x00F9
+    ld b, (cd)
+    cmp b, 0x02
+    beq SC_RETURN
+    ld cd, 0xFF31
+    ld h, (cd)
+    ld g, (cd+0x01)
+    push gh
+    dec cd
+    ld b, (cd)
+    and b, 0x01
+    push b
+    ld b, 0x00
+    ld 0xFF30, b
+    ld cd, 0x00F0
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, 0xFF35
+    ld b, (cd)
+    shl b, 0x04
+    dec cd
+    ld h, (cd)
+    clc
+    add b, h
+    ld cd, 0x00F2
+    ld h, (cd)
+    cmp a, 0x0D
+    beq SC_FINISH
+    cmp a, 0x0A
+    beq SC_NEWLINE
+    cmp a, 0x09
+    bne SC_PRINTABLE
+    ld a, 0x20
+SC_PRINTABLE:
+    cmp a, 0x20
+    bcc SC_FINISH
+    call SC_CELL
+    jmp SC_FINISH
+SC_NEWLINE:
+    ld a, 0x20
+    call SC_CELL
+    cmp h, 0x00
+    bne SC_NEWLINE
+SC_FINISH:
+    ld 0x00F0, f
+    ld 0x00F1, e
+    ld 0x00F2, h
+    pop b
+    ld 0xFF30, b
+    pop ef
+    call SC_POINTER
+SC_RETURN:
+    pop gh
+    pop ef
+    pop cd
+    pop ab
+    ret
+SC_POINTER:
+    ld 0xFF31, f
+    ld 0xFF32, e
+    ret
+SC_CELL:
+    call SC_POINTER
+    ld 0xFF33, a
+    ld 0xFF33, b
+    inc ef
+    inc ef
+    inc h
+    cmp h, 0x28
+    bne SC_CELL_DONE
+    ld h, 0x00
+    cmp ef, 0x0780
+    bcc SC_CELL_DONE
+    push ab
+    push gh
+    ld ef, 0x0000
+SC_SCROLL:
+    push ef
+    ld ab, 0x0050
+    clc
+    add ef, ab
+    call SC_POINTER
+    ld cd, 0xFF33
+    ld a, (cd)
+    pop ef
+    call SC_POINTER
+    ld 0xFF33, a
+    inc ef
+    cmp ef, 0x0730
+    bcc SC_SCROLL
+    pop gh
+    pop ab
+    push ef
+    call SC_POINTER
+    push a
+    ld a, 0x20
+SC_CLEAR_ROW:
+    ld 0xFF33, a
+    ld 0xFF33, b
+    inc ef
+    inc ef
+    cmp ef, 0x0780
+    bcc SC_CLEAR_ROW
+    pop a
+    pop ef
+SC_CELL_DONE:
+    ret
+SC_END:
+; F4 is the replay flag, F5/F6 the next raw byte, F7/F8 the end.
+; F9 marks an active interactive editor for a renderer cursor. A400-A7FF
+; holds the raw editable line. File input and serial input bypass this path.
+SC_EDIT_START:
+    push cd
+    push ef
+    ld cd, 0x00F3
+    ld a, (cd)
+    cmp a, 0x00
+    beq SC_EDIT_SCREEN
+    jmp SC_EDIT_DONE
+SC_EDIT_SCREEN:
+    ld a, (cd+0x06)
+    cmp a, 0x02
+    bne SC_EDIT_NOT_PRELOAD
+    jmp SC_EDIT_DONE
+SC_EDIT_NOT_PRELOAD:
+    ld cd, 0x00A6
+    ld a, (cd)
+    cmp a, 0x00
+    bne SC_EDIT_DONE
+    ld a, 0x01
+    ld 0x00F9, a
+    ld ef, 0xA400
+SC_EDIT_LOOP:
+    call GETCHAR_RAW
+    cmp a, 0x08
+    beq SC_EDIT_BACKSPACE
+    cmp a, 0x7F
+    beq SC_EDIT_BACKSPACE
+    cmp a, 0x0D
+    beq SC_EDIT_ENTER
+    cmp a, 0x0A
+    beq SC_EDIT_ENTER
+    cmp a, 0x09
+    beq SC_EDIT_STORE
+    cmp a, 0x20
+    bcc SC_EDIT_LOOP
+    cmp a, 0x7F
+    bcs SC_EDIT_LOOP
+SC_EDIT_STORE:
+    cmp ef, 0xA800
+    bcs SC_EDIT_OVERFLOW
+    ld (ef), a
+    inc ef
+    call SC_OUTPUT
+    jmp SC_EDIT_LOOP
+SC_EDIT_OVERFLOW:
+    ld a, 0x00
+    ld 0x00F9, a
+    call NEWLINE
+    jmp INPUT_TOO_LONG
+SC_EDIT_BACKSPACE:
+    cmp ef, 0xA400
+    beq SC_EDIT_LOOP
+    dec ef
+    ld cd, 0x00F0
+    ld b, (cd)
+    ld a, (cd+0x01)
+    cmp ab, 0x0000
+    beq SC_EDIT_LOOP
+    call SC_REWIND
+    ld a, 0x20
+    call SC_OUTPUT
+    call SC_REWIND
+    jmp SC_EDIT_LOOP
+SC_EDIT_ENTER:
+    call SC_OUTPUT
+    ld a, 0x00
+    ld 0x00F9, a
+    ld a, 0x01
+    ld 0x00F4, a
+    ld a, 0x00
+    ld 0x00F5, a
+    ld a, 0xA4
+    ld 0x00F6, a
+    ld 0x00F7, f
+    ld 0x00F8, e
+SC_EDIT_DONE:
+    pop ef
+    pop cd
+    ret
+SC_GET:
+    push cd
+    ld cd, 0x00F4
+    ld a, (cd)
+    cmp a, 0x00
+    bne SC_GET_REPLAY
+    pop cd
+    jmp GETCHAR_RAW
+SC_GET_REPLAY:
+    push ef
+    ld cd, 0x00F5
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, 0x00F7
+    ld b, (cd)
+    ld a, (cd+0x01)
+    cmp ef, ab
+    beq SC_GET_END
+    ld a, (ef)
+    inc ef
+    ld 0x00F5, f
+    ld 0x00F6, e
+    jmp SC_GET_RETURN
+SC_GET_END:
+    ld a, 0x00
+    ld 0x00F4, a
+    ld a, 0x0A
+SC_GET_RETURN:
+    pop ef
+    pop cd
+    ret
+SC_REWIND:
+    ld cd, 0x00F0
+    ld b, (cd)
+    ld a, (cd+0x01)
+    dec ab
+    dec ab
+    ld (cd), b
+    ld (cd+0x01), a
+    ld cd, 0x00F2
+    ld a, (cd)
+    cmp a, 0x00
+    bne SC_REWIND_COL
+    ld a, 0x28
+SC_REWIND_COL:
+    dec a
+    ld (cd), a
+    ret
+; Screen INPUT reveals the question, then restores the picture on success.
+; FA records saved mode, FB/FC the hardware VRAM pointer.
+SC_INPUT_BEGIN:
+    push ab
+    push cd
+    ld a, 0x00
+    ld 0x00FA, a
+    ld cd, 0x00F3
+    ld a, (cd)
+    cmp a, 0x00
+    bne SC_INPUT_BEGIN_DONE
+    ld cd, 0xFF30
+    ld a, (cd)
+    and a, 0x01
+    ld 0x00FA, a
+    cmp a, 0x00
+    beq SC_INPUT_BEGIN_DONE
+    ld a, (cd+0x01)
+    ld 0x00FB, a
+    ld a, (cd+0x02)
+    ld 0x00FC, a
+    ld a, 0x00
+    ld 0xFF30, a
+SC_INPUT_BEGIN_DONE:
+    pop cd
+    pop ab
+    ret
+SC_INPUT_END:
+    push ab
+    push cd
+    ld cd, 0x00FA
+    ld a, (cd)
+    cmp a, 0x00
+    beq SC_INPUT_END_DONE
+    ld 0xFF30, a
+    ld a, (cd+0x01)
+    ld 0xFF31, a
+    ld a, (cd+0x02)
+    ld 0xFF32, a
+    ld a, 0x00
+    ld (cd), a
+SC_INPUT_END_DONE:
+    pop cd
+    pop ab
+    ret
+; The frontend enters here only at an instruction boundary on Ctrl-C.
+; PROMPT reclaims the stack and reveals the retained text page.
+SC_BREAK:
+    ld a, 0x04
+    ld 0xFF10, a
+    ld a, 0x00
+    ld 0x00A6, a
+    ld 0x00A8, a
+    ld 0x00F4, a
+    ld 0x00F9, a
+    ld 0x00FA, a
+    jmp PROMPT
