@@ -150,7 +150,7 @@ mod tests {
         let Packet::Frame(picture) = receiver.try_recv().unwrap() else {
             panic!("expected frame")
         };
-        assert_eq!(picture[0], 0xff00_0000);
+        assert_eq!(picture[0], 0xffff_ff00);
         sys.video.borrow_mut().mode = 0;
         emit_native(&sys, &sender, false, ConsoleRoute::Screen);
         let Packet::Frame(text) = receiver.try_recv().unwrap() else {

@@ -47,8 +47,8 @@ fn invalid_statements_leave_video_unchanged() {
     let (guest, _) = guest(source);
     assert_eq!(host.video.borrow().picture, [0; 3840]);
     assert_eq!(guest.video.borrow().picture, [0; 3840]);
-    assert_eq!(host.video.borrow().ink, 0);
-    assert_eq!(guest.video.borrow().ink, 0);
+    assert_eq!(host.video.borrow().ink, 7);
+    assert_eq!(guest.video.borrow().ink, 7);
 }
 
 #[test]

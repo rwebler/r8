@@ -16,7 +16,6 @@ use std::io::{BufRead, Read as _, Write};
 fn binary_capacity(address: u16) -> Result<usize> {
     match address {
         0x0000..=0xBFFF => Ok(0xC000_usize.saturating_sub(usize::from(address))),
-        0xEF00..=0xFEFF => Ok(0xFF00_usize.saturating_sub(usize::from(address))),
         _ => bail!("binary transfer address outside RAM"),
     }
 }
@@ -34,6 +33,9 @@ pub struct Basic {
     random: RefCell<Option<crate::random::RandomDevice>>,
     pool: RefCell<StringPool>,
     string_arrays: BTreeMap<String, Vec<String>>,
+    array_dimensions: BTreeMap<String, Vec<usize>>,
+    functions: BTreeMap<String, (String, Vec<Token>)>,
+    bindings: RefCell<Vec<(String, i16)>>,
     // Reference-only byte memory; native BASIC uses the RX-82 bus instead.
     memory: BTreeMap<u16, u8>,
     data_line: u16,
@@ -55,6 +57,9 @@ impl Default for Basic {
             random: RefCell::new(None),
             pool: RefCell::new(StringPool::default()),
             string_arrays: BTreeMap::new(),
+            array_dimensions: BTreeMap::new(),
+            functions: BTreeMap::new(),
+            bindings: RefCell::new(Vec::new()),
             memory: BTreeMap::from([(0x87, 0x10)]),
             data_line: 0,
             data_offset: None,
@@ -174,6 +179,9 @@ struct Parser<'source> {
     random: &'source RefCell<Option<crate::random::RandomDevice>>,
     pool: &'source RefCell<StringPool>,
     string_arrays: &'source BTreeMap<String, Vec<String>>,
+    array_dimensions: &'source BTreeMap<String, Vec<usize>>,
+    functions: &'source BTreeMap<String, (String, Vec<Token>)>,
+    bindings: &'source RefCell<Vec<(String, i16)>>,
     memory: &'source BTreeMap<u16, u8>,
     tokens: &'source [Token],
     pos: usize,
@@ -452,17 +460,24 @@ impl Parser<'_> {
         if !self.symbol('(') {
             return Ok(None);
         }
-        let index = self.expression()?;
-        ensure!(self.symbol(')'), "expected )");
-        let size = if name.ends_with('$') {
-            self.string_arrays.get(name).map(Vec::len)
-        } else {
-            self.arrays.get(name).map(Vec::len)
+        let dimensions = self
+            .array_dimensions
+            .get(name)
+            .context("array not dimensioned")?;
+        let mut offset = 0_usize;
+        for (position, &length) in dimensions.iter().enumerate() {
+            let index = usize::try_from(self.expression()?).context("subscript out of range")?;
+            ensure!(index < length, "subscript out of range");
+            offset = offset
+                .checked_mul(length)
+                .and_then(|n| n.checked_add(index))
+                .context("subscript out of range")?;
+            if position + 1 < dimensions.len() {
+                ensure!(self.symbol(','), "wrong subscript count");
+            }
         }
-        .context("array not dimensioned")?;
-        let index = usize::try_from(index).context("subscript out of range")?;
-        ensure!(index < size, "subscript out of range");
-        Ok(Some(index))
+        ensure!(self.symbol(')'), "wrong subscript count");
+        Ok(Some(offset))
     }
     fn address(&mut self) -> Result<u16> {
         // A bare unsigned literal reaches the whole address space. Computed
@@ -499,6 +514,37 @@ impl Parser<'_> {
     }
     fn expression(&mut self) -> Result<i16> {
         self.binary(0)
+    }
+    fn function_call(&mut self, name: &str) -> Result<i16> {
+        ensure!(self.symbol('('), "expected (");
+        ensure!(!self.is_string(), "type mismatch");
+        let argument = self.expression()?;
+        ensure!(self.symbol(')'), "expected )");
+        let (formal, body) = self.functions.get(name).context("undefined function")?;
+        ensure!(self.bindings.borrow().len() < 64, "expression too deep");
+        self.bindings.borrow_mut().push((formal.clone(), argument));
+        let mut body_parser = Parser {
+            video: self.video,
+            sound: self.sound,
+            random: self.random,
+            pool: self.pool,
+            string_arrays: self.string_arrays,
+            array_dimensions: self.array_dimensions,
+            functions: self.functions,
+            bindings: self.bindings,
+            memory: self.memory,
+            tokens: body,
+            pos: 0,
+            vars: self.vars,
+            arrays: self.arrays,
+            strings: self.strings,
+        };
+        let result = body_parser.expression().and_then(|value| {
+            body_parser.end()?;
+            Ok(value)
+        });
+        self.bindings.borrow_mut().pop();
+        result
     }
     fn randomize(&mut self) -> Result<()> {
         let seed = if self.pos == self.tokens.len() {
@@ -562,8 +608,24 @@ impl Parser<'_> {
                             .as_mut()
                             .and_then(|device| device.read(address))
                     })
-                    .unwrap_or_else(|| self.memory.get(&address).copied().unwrap_or_default());
+                    .unwrap_or_else(|| {
+                        if (0xC100..0xFF00).contains(&address) {
+                            crate::native::ROM
+                                .get(usize::from(address - 0xC100))
+                                .copied()
+                                .unwrap_or_default()
+                        } else {
+                            self.memory.get(&address).copied().unwrap_or_default()
+                        }
+                    });
                 i16::from(byte)
+            }
+            Token::Word(name)
+                if name.len() == 3
+                    && name.starts_with("FN")
+                    && name.as_bytes()[2].is_ascii_uppercase() =>
+            {
+                self.function_call(&name)?
             }
             Token::Word(name) => {
                 ensure!(!name.ends_with('$'), "type mismatch");
@@ -574,7 +636,13 @@ impl Parser<'_> {
                         .and_then(|array| array.get(index))
                         .context("subscript out of range")?
                 } else {
-                    self.vars.get(&name).copied().unwrap_or_default()
+                    self.bindings
+                        .borrow()
+                        .iter()
+                        .rev()
+                        .find(|(formal, _)| formal == &name)
+                        .map(|(_, value)| *value)
+                        .unwrap_or_else(|| self.vars.get(&name).copied().unwrap_or_default())
                 }
             }
             Token::Symbol('-') => {
@@ -696,7 +764,7 @@ impl Basic {
         self.lines.end()
     }
     fn sync_program_memory(&mut self) {
-        for (address, &byte) in (0x1000..=0x8fff).zip(self.lines.image()) {
+        for (address, &byte) in (0x1000..=0x7fff).zip(self.lines.image()) {
             self.memory.insert(address, byte);
         }
         let [low, high] = self.lines.end().to_le_bytes();
@@ -737,6 +805,9 @@ impl Basic {
                 random: &self.random,
                 pool: &self.pool,
                 string_arrays: &self.string_arrays,
+                array_dimensions: &self.array_dimensions,
+                functions: &self.functions,
+                bindings: &self.bindings,
                 memory: &self.memory,
                 tokens,
                 pos,
@@ -796,6 +867,9 @@ impl Basic {
         self.sync_program_memory();
         self.vars.clear();
         self.arrays.clear();
+        self.array_dimensions.clear();
+        self.functions.clear();
+        self.bindings.get_mut().clear();
         self.strings.clear();
         self.string_arrays.clear();
         *self.pool.get_mut() = StringPool::default();
@@ -816,6 +890,7 @@ impl Basic {
             .with_context(|| format!("in line {number}"))?;
         self.sync_program_memory();
         self.reset_data();
+        self.functions.clear();
         Ok(true)
     }
     fn store_string(&mut self, name: String, index: Option<usize>, value: String) -> Result<()> {
@@ -873,6 +948,9 @@ impl Basic {
             random: &self.random,
             pool: &self.pool,
             string_arrays: &self.string_arrays,
+            array_dimensions: &self.array_dimensions,
+            functions: &self.functions,
+            bindings: &self.bindings,
             memory: &self.memory,
             tokens,
             pos: 0,
@@ -940,7 +1018,9 @@ impl Basic {
                     .as_mut()
                     .is_some_and(|device| device.write(address, value))
             {
-                self.memory.insert(address, value);
+                if !(0xC100..0xFF00).contains(&address) {
+                    self.memory.insert(address, value);
+                }
             }
             return Ok(Flow::Next);
         }
@@ -1005,6 +1085,46 @@ impl Basic {
             video.write(0xff3a, 1);
             return Ok(Flow::Next);
         }
+        if parser.word("LINE") {
+            let x1 = parser.expression()?;
+            ensure!(parser.symbol(','), "expected comma");
+            let y1 = parser.expression()?;
+            ensure!(parser.symbol(','), "expected comma");
+            let x2 = parser.expression()?;
+            ensure!(parser.symbol(','), "expected comma");
+            let y2 = parser.expression()?;
+            parser.end()?;
+            let mut video = self.video.borrow_mut();
+            ensure!(
+                [x1, x2].iter().all(|x| (0..160).contains(x))
+                    && [y1, y2].iter().all(|y| (0..96).contains(y))
+                    && video.read(0xff30).unwrap_or_default() & 1 == 1,
+                "ILLEGAL QUANTITY"
+            );
+            let dx = (x2 - x1).abs();
+            let dy = (y2 - y1).abs();
+            let sx = if x1 < x2 { 1 } else { -1 };
+            let sy = if y1 < y2 { 1 } else { -1 };
+            let (mut x, mut y, mut error) = (x1, y1, dx - dy);
+            loop {
+                video.write(0xff36, x as u8);
+                video.write(0xff37, y as u8);
+                video.write(0xff3a, 1);
+                if x == x2 && y == y2 {
+                    break;
+                }
+                let doubled = error * 2;
+                if doubled > -dy {
+                    error -= dy;
+                    x += sx;
+                }
+                if doubled < dx {
+                    error += dx;
+                    y += sy;
+                }
+            }
+            return Ok(Flow::Next);
+        }
         if parser.word("DATA") {
             return Ok(Flow::Next);
         }
@@ -1033,30 +1153,60 @@ impl Basic {
                 bail!("expected array name");
             };
             ensure!(parser.symbol('('), "expected (");
-            let upper = parser.expression()?;
+            let mut dimensions = Vec::new();
+            loop {
+                let upper =
+                    usize::try_from(parser.expression()?).context("subscript out of range")?;
+                dimensions.push(upper.saturating_add(1));
+                if !parser.symbol(',') {
+                    break;
+                }
+                ensure!(dimensions.len() < 3, "wrong subscript count");
+            }
             ensure!(parser.symbol(')'), "expected )");
             parser.end()?;
-            let size = usize::try_from(upper)
-                .context("subscript out of range")?
-                .saturating_add(1);
+            let size = dimensions
+                .iter()
+                .try_fold(1_usize, |n, length| n.checked_mul(*length))
+                .context("array memory full")?;
+            ensure!(size <= 2048, "array memory full");
             ensure!(
                 !self.arrays.contains_key(&name) && !self.string_arrays.contains_key(&name),
                 "array already dimensioned"
             );
-            let used = self
-                .arrays
-                .values()
-                .fold(0_usize, |total, array| total.saturating_add(array.len()));
+            let used = self.arrays.values().fold(0_usize, |total, array| {
+                total.saturating_add(array.len() * 2)
+            });
             let used = self
                 .string_arrays
                 .values()
-                .fold(used, |total, array| total.saturating_add(array.len()));
-            ensure!(used.saturating_add(size) <= 2048, "array memory full");
+                .fold(used, |total, array| total.saturating_add(array.len() * 2));
+            let metadata = self
+                .array_dimensions
+                .values()
+                .map(|dims| if dims.len() == 1 { 0 } else { dims.len() * 2 })
+                .sum::<usize>();
+            let extra = if dimensions.len() == 1 {
+                0
+            } else {
+                dimensions.len() * 2
+            };
+            ensure!(
+                used.saturating_add(metadata)
+                    .saturating_add(size * 2)
+                    .saturating_add(extra)
+                    <= 4096,
+                "array memory full"
+            );
+            self.array_dimensions.insert(name.clone(), dimensions);
             if name.ends_with('$') {
                 self.string_arrays.insert(name, vec![String::new(); size]);
             } else {
                 self.arrays.insert(name, vec![0; size]);
             }
+            return Ok(Flow::Next);
+        }
+        if parser.word("DEF") {
             return Ok(Flow::Next);
         }
         if parser.word("REM") {
@@ -1149,7 +1299,25 @@ impl Basic {
             return self.statement(rest, input, output);
         }
         if parser.word("PRINT") || parser.symbol('?') {
-            let mut newline = true;
+            let at = parser.word("AT");
+            if at {
+                let screen = self
+                    .screen_console
+                    .as_ref()
+                    .context("screen console required")?;
+                let row = parser.expression()?;
+                ensure!(parser.symbol(','), "expected comma");
+                let column = parser.expression()?;
+                ensure!(parser.symbol(';'), "expected semicolon");
+                ensure!(
+                    (0..=23).contains(&row) && (0..=39).contains(&column),
+                    "cursor out of range"
+                );
+                screen
+                    .borrow_mut()
+                    .set_cursor(row as usize, column as usize);
+            }
+            let mut newline = !at || parser.pos < tokens.len();
             while parser.pos < tokens.len() {
                 if parser.is_string() {
                     write!(output, "{}", parser.string_expression()?)?;
@@ -1263,11 +1431,52 @@ impl Basic {
     pub fn run(&mut self, input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
         self.vars.clear();
         self.arrays.clear();
+        self.array_dimensions.clear();
+        self.bindings.get_mut().clear();
         self.strings.clear();
         self.string_arrays.clear();
         *self.pool.get_mut() = StringPool::default();
         self.reset_data();
         let program = self.lines.clone();
+        let mut functions = BTreeMap::new();
+        for (line, bytes) in program.iter() {
+            let tokens = tokens::decode(bytes)?;
+            if tokens.first() != Some(&Token::Word("DEF".to_owned())) {
+                continue;
+            }
+            let (
+                Some(Token::Word(name)),
+                Some(Token::Symbol('(')),
+                Some(Token::Word(formal)),
+                Some(Token::Symbol(')')),
+                Some(Token::Symbol('=')),
+            ) = (
+                tokens.get(1),
+                tokens.get(2),
+                tokens.get(3),
+                tokens.get(4),
+                tokens.get(5),
+            )
+            else {
+                bail!("bad definition in line {line}");
+            };
+            ensure!(
+                name.len() == 3
+                    && name.starts_with("FN")
+                    && name.as_bytes()[2].is_ascii_uppercase()
+                    && formal.len() == 1
+                    && formal.as_bytes()[0].is_ascii_uppercase()
+                    && tokens.len() > 6,
+                "bad definition in line {line}"
+            );
+            ensure!(
+                !functions.contains_key(name),
+                "duplicate function in line {line}"
+            );
+            functions.insert(name.clone(), (formal.clone(), tokens[6..].to_vec()));
+        }
+        self.functions = functions;
+
         let pairs = loop_pairs(&program)?;
         let after = |line| program.record(program.find(line)?).map(|(next, _, _)| next);
         let mut pc = Some(0x1000);
@@ -1461,6 +1670,9 @@ impl Basic {
                 self.sync_program_memory();
                 self.vars.clear();
                 self.arrays.clear();
+                self.array_dimensions.clear();
+                self.functions.clear();
+                self.bindings.get_mut().clear();
                 self.strings.clear();
                 self.string_arrays.clear();
                 *self.pool.get_mut() = StringPool::default();
@@ -1476,7 +1688,7 @@ impl Basic {
             "HELP" => {
                 writeln!(
                     output,
-                    "Numbered lines edit the program; a bare number deletes a line.\nRUN, LIST, NEW, QUIT\nSAVE \"file.bas\", LOAD \"file.bas\" (prompt only)\nBSAVE \"file\",address,length; BLOAD \"file\",address: raw bytes\nBinary ranges: 0000-BFFF or EF00-FEFF; zero length allowed\nPRINT, LET, INPUT, IF ... THEN, GOTO, GOSUB, RETURN, REM, END\nDIM name(upper): zero-based arrays, 2048 total integer elements\nFOR name = start TO limit [STEP step], NEXT [name] (program only)\nSigned 16-bit integers, variables, + - * / and parentheses; comparisons = <> < <= > >="
+                    "Numbered lines edit the program; a bare number deletes a line.\nRUN, LIST, NEW, QUIT\nSAVE \"file.bas\", LOAD \"file.bas\" (prompt only)\nBSAVE \"file\",address,length; BLOAD \"file\",address: raw bytes\nBinary range: 0000-BFFF; zero length allowed\nPRINT, LET, INPUT, IF ... THEN, GOTO, GOSUB, RETURN, REM, END\nDIM name(upper[,upper[,upper]]): zero-based, 2048 max elements\nDEF FNA(X)=expression (numbered lines); FNA(value)\nPRINT AT row,column; items (screen console)\nFOR name = start TO limit [STEP step], NEXT [name] (program only)\nSigned 16-bit integers, variables, + - * / and parentheses; comparisons = <> < <= > >="
                 )?;
                 writeln!(
                     output,
@@ -1490,10 +1702,13 @@ impl Basic {
                     output,
                     "PEEK(address), POKE address,byte: reference memory plus optional random device; use --native for RX-82 RAM"
                 )?;
-                writeln!(output, "SCREEN 0/1; CLS; COLOR ink,paper; PLOT x,y")?;
                 writeln!(
                     output,
-                    "PRINT stays serial; video FF30-FF3F and sound FF40-FF47 use PEEK/POKE"
+                    "SCREEN 0/1; CLS; COLOR ink,paper; PLOT x,y; LINE x1,y1,x2,y2"
+                )?;
+                writeln!(
+                    output,
+                    "Screen PRINT AT requires a screen console; video FF30-FF3F and sound FF40-FF47 use PEEK/POKE"
                 )?;
                 writeln!(
                     output,
@@ -1504,6 +1719,10 @@ impl Basic {
             _ => {}
         }
         let tokens = tokens::decode(&tokens::encode(source)?)?;
+        ensure!(
+            tokens.first() != Some(&Token::Word("DEF".to_owned())),
+            "DEF requires RUN"
+        );
         if let Some(Token::Word(command)) = tokens.first().cloned()
             && (command == "SAVE" || command == "LOAD")
         {

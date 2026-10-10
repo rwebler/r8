@@ -95,7 +95,7 @@ output is replaced. Filenames must be nonempty quoted literals of at most 240
 bytes; case and spaces are preserved, and relative paths use the host working
 directory.
 
-Binary transfers must fit wholly in `0000`–`BFFF` or `EF00`–`FEFF` (hex).
+Binary transfers must fit wholly in `0000`–`BFFF` (hex).
 ROM, devices, gaps, and ranges crossing a boundary are rejected. A zero-length
 BSAVE creates an empty file; BLOAD of an empty file changes no destination
 bytes. Both still require an address inside one of the allowed regions. Bare
@@ -131,8 +131,10 @@ The initial dialect supports:
   Elements start at zero. Use `A(I)` in expressions, assignments, and `INPUT A(I)`.
   Bounds and indices can be expressions; negative or excessive indices are errors.
   Declare each array before use; a second `DIM` for the same array is an error.
-  Scalar `A` and array `A(...)` are separate. Arrays are one-dimensional, with
-  one declaration per statement and a shared limit of 2,048 elements.
+  Scalar `A` and array `A(...)` are separate. Arrays have one to three
+  dimensions, with one declaration per statement. `DIM A(2,3)` creates 12
+  elements in row major order. The product may be at most 2,048 elements;
+  metadata and elements share the 4 KiB array pool.
   `RUN`, `NEW`, and successful `LOAD` clear arrays; `SAVE` stores source only.
 - `LET name = expression` (the `LET` keyword is optional), and `INPUT name`.
 - String variables such as `A$`, assignment (`A$="hello"`), `INPUT A$`,
@@ -143,6 +145,11 @@ The initial dialect supports:
   array name, not an indexed element: `LEN(A(0))` is a type error.
 - `PRINT` or `?` with string and integer expressions. Semicolons join
   items; commas insert tabs. A trailing separator suppresses the newline.
+- `PRINT AT row,column; items` positions output on the 40 by 24 screen console.
+  Coordinates start at zero. A trailing semicolon keeps the cursor in place.
+- Numbered `DEF FNA(X)=expression` defines a one argument numeric function;
+  `FNA(value)` calls it. Names range from `FNA` through `FNZ`. Definitions
+  are built before `RUN`, so calls can precede their definitions.
 - `IF expression comparison expression THEN line` or `THEN statement`, with
   `=`, `<>`, `<`, `<=`, `>`, and `>=` comparisons. Both operands must be the
   same type. Strings compare in case-sensitive ASCII order.
@@ -151,7 +158,8 @@ The initial dialect supports:
 - `PEEK(address)` reads a byte; `POKE address,value` writes a byte from 0 to 255.
 - `SCREEN mode` selects text (0) or picture (1); `CLS` clears the active page.
 - `COLOR ink,paper` selects palette indices 0–15; `PLOT x,y` draws in picture
-  mode at x 0–159, y 0–95. Invalid ranges or mode report `ILLEGAL QUANTITY`.
+  mode at x 0–159, y 0–95. `LINE x1,y1,x2,y2` draws both endpoints in picture
+  mode. Invalid ranges or mode report `ILLEGAL QUANTITY`.
 - `GOTO line`, `GOSUB line`, `RETURN`, `END`, `STOP`, and `REM` comments.
 
 Keywords and variable names are case-insensitive; names start with a letter and
@@ -196,7 +204,8 @@ runtime values. The native ROM has 26 string
 variables (`A$`–`Z$`); the reference interpreter also permits longer names.
 
 Use `DIM R$(2)` to allocate three string elements, then assign, INPUT, or READ
-`R$(0)` through `R$(2)`. Integer and string arrays share the 2048-element limit.
+`R$(0)` through `R$(2)`. Integer and string arrays share the 4 KiB allocation
+pool; multidimensional metadata uses four or six bytes per array.
 `LEN(R$(0))` returns an element's length. Bare `LEN(R$)` returns the array's
 size when dimensioned, otherwise the scalar's length; `LEN((R$))` always
 measures the scalar. See [rooms.bas](examples/rooms.bas).
@@ -562,8 +571,8 @@ line numbers; see the monitor commands below.
 The native dialect supports `PRINT`, assignment (`LET` optional), integer and
 string `INPUT`, string concatenation, `LEN`, `MID$`/`LEFT$`/`RIGHT$`,
 `ASC`/`CHR$`/`VAL`/`INSTR`, `DATA`/`READ`/`RESTORE`, `PEEK`/`POKE`,
-`RND`/`RANDOMIZE` with the optional random device, one-dimensional integer and string arrays
-declared with `DIM`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
+`RND`/`RANDOMIZE` with the optional random device, one to three dimensional integer and string arrays
+declared with `DIM`, `DEF`/`FN`, `PRINT AT`, `LINE`, signed 16-bit expressions (`+ - * /`, parentheses, unary signs), all
 six comparisons with `IF ... THEN`, `GOTO`, `GOSUB`/`RETURN`, `FOR`/`NEXT` with
 `STEP`, `REM`, `END`/`STOP`, `LIST`, `RUN`, `NEW`, and `QUIT`. Bounds, step
 capture, and checked arithmetic follow the reference dialect. Invalid input
@@ -571,7 +580,7 @@ reports a specific cause and returns to the prompt. Errors raised during `RUN`
 include the current BASIC line number; direct-mode errors omit it.
 
 Native resource limits: variables are single letters A–Z, reset to zero on
-`RUN`; line numbers are 1–65535; program storage is a packed 32 KiB token chain
+`RUN`; line numbers are 1–65535; program storage is a packed 28 KiB token chain
 with no fixed line count; 64 subroutine frames and 48 loop frames fit in RAM.
 `FOR`/`NEXT` must be standalone statements. Loop matching occurs when the `FOR`
 is executed, rather than the reference interpreter's whole-program precheck.
@@ -585,7 +594,7 @@ A failed validation or open leaves the old program and variables intact.
 Statement syntax is checked during execution. Blank lines, CRLF, and a missing
 final newline are accepted. Empty files clear the program. Files are limited
 to 1 MiB by the byte-stream device, allowing detokenized source to exceed the
-32 KiB packed program window.
+28 KiB packed program window.
 
 Native and reference BASIC use the same text file format; programs must respect
 the native dialect's resource limits to run on both. For example:
@@ -616,36 +625,38 @@ The stock reset vector still points to `C000`; reset enters the system firmware,
 not BASIC. This is a fixed address expansion window, not bank switching or
 automatic firmware discovery. Modules must be assembled for their load address.
 
-Memory layout: console at `FF00`–`FF02`, BASIC code within `C100`–`ED43`,
-original system firmware at `C000`–`C0FF`, reset vector at `FFFE`, and optional
-string RAM at `EF00`–`FEFF`. The BASIC frontend installs that RAM ahead of the
-stock ROM's zero padding. Ordinary machines retain the stock memory map.
+Memory layout: console at `FF00`–`FF02`, BASIC code within `C100`–`F5BA`,
+original system firmware at `C000`–`C0FF`, and reset vector at `FFFE`.
+Ordinary machines retain the stock memory map.
 The entry and INPUT line buffer is at `0200`, integer scalar words at `0300`–`0333`, string
-scalar offsets at `0340`–`0373`, subroutine frames at `0400`–`04FF`, loop frames
+scalar offsets at `0340`–`0373`, function body pointers at `0374`–`03A7`, subroutine frames at `0400`–`04FF`, loop frames
 at `0500`–`07FF`, integer-array descriptors at `0800`–`0867`, string-array
 descriptors at `0870`–`08D7`, token scratch at `0900`–`0DFF`, string scratch at `0E00`–`0FFF`, program lines at
-`1000`–`8FFF`, shared array elements at `9000`–`9FFF`, and the CPU stack at
+`1000`–`7FFF`, string pool at `8000`–`8FFF`, shared array elements at `9000`–`9FFF`, and the CPU stack at
 `A000`–`BFFF`. During entry, lexical items longer than 255 bytes spill to `A000`–`A3FF`; long
 numbered lines stage tokens beyond the old end marker until validation succeeds.
 
-Each array descriptor contains a little-endian absolute base and inclusive
-upper bound. Zero base means undeclared. Integer elements hold signed words;
+Each array descriptor contains a little-endian absolute element base and an
+encoded element count minus one. Rank one uses the old inclusive upper bound;
+rank two and three set `0800` and `1000` respectively in that word and store
+their dimension lengths immediately before the elements. Zero base means
+undeclared. Integer elements hold signed words;
 string elements and scalar slots hold one-based pool offsets. A zero offset
-means empty. Otherwise add `EEFF` to obtain the record address: its first byte
+means empty. Otherwise add `7FFF` to obtain the record address: its first byte
 is the length, followed by that many ASCII bytes, without a NUL terminator.
-For example, `M 0340` inspects scalar string offsets and `M EF00` shows pool
+For example, `M 0340` inspects scalar string offsets and `M 8000` shows pool
 records. In BASIC, `P=PEEK(832)+256*PEEK(833)` reads A$'s offset; when P is
-nonzero, `PEEK(P-4353)` reads its length and `PEEK(P-4352)` its first character.
+nonzero, `PEEK(P-1-32768)` reads its length and `PEEK(P-32768)` its first character.
 Addresses change during compaction, so obtain the current offset before use.
 
 The pool bump is at `00B2`, temporary top at `00B6`, and statement mark at
-`00B8`. Stable records grow upward from `EF00`; temporaries grow downward from
-`FF00`. Freed records start with zero followed by their former payload length.
+`00B8`. Stable records grow upward from `8000`; temporaries grow downward from
+`9000`. Freed records start with zero followed by their former payload length.
 Compaction updates string references and ignores integer array words.
 Each packed line contains a little-endian next address, a little-endian line
 number, and a NUL-terminated token stream. Binary numbers and length-prefixed
 strings can contain zero bytes inside their payloads. The chain starts at
-`1000`; a zero pointer ends it. `0086` holds the terminator address (`8FFE` at
+`1000`; a zero pointer ends it. `0086` holds the terminator address (`7FFE` at
 maximum capacity, leaving room for both zero bytes), `0084` is the execution
 cursor, and `00B0` remains the independent array bump. Edits slide the tail
 and repair links. `LIST` and `SAVE` detokenize; `.bas` files stay text. The
@@ -661,7 +672,9 @@ random remainder divisor, and builds decimal values; the decimal parser uses
 a two-bit shift only after its 6553 precheck. Signed results, truncation toward
 zero, overflow checks, and division by zero errors are preserved.
 
-The earlier SHL change reduced the BASIC ROM from 10,537 to 10,523 bytes. The isolated
+The earlier SHL change reduced the then-current BASIC ROM from 10,537 to 10,523 bytes.
+The expanded BASIC ROM is 13,499 bytes, ends at `F5BB`, and leaves 2,373 bytes in
+the `C100`–`FEFF` module window. The isolated
 arithmetic harness measured 646 to 618 R8 cycles for `181 * 181`, 1,005 to
 945 for `-32768 * 1`, 1,639 to 1,519 for `30000 / 1`, and 1,483 to 1,379 for
 `30000 / 7`. These compare the same binary algorithms before and after SHL.
@@ -709,7 +722,7 @@ The line suffix identifies the executing statement, not the missing target.
 | `FOR VARIABLE ALREADY ACTIVE` | Use distinct variables for nested loops. |
 | `RETURN WITHOUT GOSUB` | There is no subroutine return address. |
 | `UNDEFINED LINE` | A `GOTO`, `GOSUB`, or conditional jump target does not exist. |
-| `PROGRAM FULL` | The edit or loaded source exceeds the 32 KiB packed program budget. The existing chain is retained. |
+| `PROGRAM FULL` | The edit or loaded source exceeds the 28 KiB packed program budget. The existing chain is retained. |
 | `GOSUB STACK FULL`, `FOR STACK FULL`, `EXPRESSION TOO DEEP` | Execution exhausted the corresponding stack limit. |
 | `INVALID LINE NUMBER` | A source line or target has an invalid number, including zero. |
 | `LINE TOO LONG`, `INVALID CHARACTER` | A line exceeds available staging space, or input contains an unsupported control byte. |

@@ -38,12 +38,12 @@ fn room_fixture_reclaims_replaced_text_and_rewrites_array_offsets() {
         assert!(!output.contains('?'), "{output}");
     }
     // After compaction only Garden (7 bytes) and Entrance (9 bytes) are live.
-    assert_eq!(word(&sys, 0x00B2), 0xEF10);
-    assert_eq!(word(&sys, 0x00B6), 0xFF00);
+    assert_eq!(word(&sys, 0x00B2), 0x8010);
+    assert_eq!(word(&sys, 0x00B6), 0x9000);
     assert_eq!(word(&sys, 0x9000), 8);
     assert_eq!(word(&sys, 0x9002), 1);
-    assert_eq!(sys.peek_mem(0xEF00), 6);
-    assert_eq!(sys.peek_mem(0xEF07), 8);
+    assert_eq!(sys.peek_mem(0x8000), 6);
+    assert_eq!(sys.peek_mem(0x8007), 8);
 }
 
 #[test]
@@ -58,8 +58,8 @@ fn long_lengths_and_failed_assignment_preserve_old_value() {
         assert!(output.contains(&full), "{output}");
     }
     assert_eq!(word(&sys, 0x0340), 1);
-    assert_eq!(sys.peek_mem(0xEF00), 255);
-    assert_eq!(sys.peek_mem(0xEFFF), b'x');
+    assert_eq!(sys.peek_mem(0x8000), 255);
+    assert_eq!(sys.peek_mem(0x80FF), b'x');
 }
 
 #[test]
@@ -75,8 +75,8 @@ fn pool_exhaustion_keeps_scalar_and_array_values_and_recovers() {
         assert!(output.contains("ok\t255\n"), "{output}");
         assert!(output.contains("> 0\n"), "{output}");
     }
-    assert_eq!(word(&sys, 0x00B2), 0xEF00);
-    assert_eq!(word(&sys, 0x00B6), 0xFF00);
+    assert_eq!(word(&sys, 0x00B2), 0x8000);
+    assert_eq!(word(&sys, 0x00B6), 0x9000);
 }
 
 #[test]
@@ -103,6 +103,20 @@ fn scalar_names_array_types_read_input_and_len_remain_independent() {
     }
     assert_eq!(word(&sys, 0x9000), 7);
     assert_eq!(word(&sys, 0x0300), 7);
+}
+
+#[test]
+fn multidimensional_arrays_use_row_major_indices_and_survive_string_compaction() {
+    let (sys, outputs) = session(
+        "DIM A(1,2,3)\nDIM I(1)\nI(0)=1\nI(1)=2\nA(I(0),I(1),3)=73\nDIM S$(1,1)\nS$(0,0)=\"first\"\nS$(1,1)=\"old\"\nS$(1,1)=\"new\"\nPRINT LEN(A),A(1,2,3),A(0,0,0),LEN(S$),S$(0,0),S$(1,1)\nA(1,3,0)=1\nA(1,2)=1\nA(1,2,3,0)=1\nPRINT A(1,2,3)\nQUIT\n",
+    );
+    for output in outputs {
+        assert!(output.contains("24\t73\t0\t4\tfirst\tnew\n"), "{output}");
+        assert_eq!(output.matches("? ").count(), 3, "{output}");
+        assert!(output.contains("> 73\n"), "{output}");
+    }
+    assert_eq!(word(&sys, 0x0800), 0x9006);
+    assert_eq!(word(&sys, 0x0802), 0x1017);
 }
 
 #[test]

@@ -214,7 +214,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Vec<Token>> {
             0xb3..=0xb5 => {
                 out.push(Token::Comparison(byte));
             }
-            0x80..=0xac => {
+            0x80..=0xad | 0xb6..=0xb7 => {
                 let (_, word) = keywords()
                     .find(|&(code, _)| code == byte)
                     .context("invalid token")?;
@@ -289,7 +289,7 @@ pub(super) fn text(bytes: &[u8]) -> Result<String> {
                 0xb4 => "<=",
                 _ => ">=",
             }),
-            0x80..=0xac => {
+            0x80..=0xad | 0xb6..=0xb7 => {
                 let (_, word) = keywords()
                     .find(|&(code, _)| code == byte)
                     .context("invalid token")?;
@@ -306,7 +306,7 @@ pub(super) fn text(bytes: &[u8]) -> Result<String> {
                     break;
                 }
                 if bytes.get(pos) != Some(&0)
-                    && (byte < 0x9a || matches!(byte, 0x9c | 0x9e | 0xa7..=0xac))
+                    && (byte < 0x9a || matches!(byte, 0x9c | 0x9e | 0xa7..=0xad | 0xb6..=0xb7))
                 {
                     out.push(' ');
                 }
@@ -333,7 +333,7 @@ impl Program {
     }
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "edits cap the image at 32768 bytes"
+        reason = "edits cap the image at 28672 bytes"
     )]
     pub(super) fn end(&self) -> u16 {
         0x1000_u16.strict_add(self.bytes.len() as u16).strict_sub(2)
@@ -429,7 +429,7 @@ impl Program {
         // Long native entries stage after the old chain; retain identical
         // admission rules in the reference interpreter.
         ensure!(
-            size <= 0x0504 || size <= 0x8000_usize.strict_sub(self.bytes.len()),
+            size <= 0x0504 || size <= 0x7000_usize.strict_sub(self.bytes.len()),
             "LINE TOO LONG"
         );
         let length = self
@@ -437,7 +437,7 @@ impl Program {
             .len()
             .strict_sub(old_end.strict_sub(start))
             .strict_add(size);
-        ensure!(length <= 0x8000, "PROGRAM FULL");
+        ensure!(length <= 0x7000, "PROGRAM FULL");
         let mut record = Vec::new();
         if size != 0 {
             record.extend([0, 0]);
@@ -528,14 +528,14 @@ mod tests {
     #[test]
     fn full_window_is_atomic() -> Result<()> {
         let mut program = Program::default();
-        program.edit(10, &format!("REM {}", "x".repeat(0x7FF7)))?;
-        assert_eq!(program.end(), 0x8ffe);
+        program.edit(10, &format!("REM {}", "x".repeat(0x6FF7)))?;
+        assert_eq!(program.end(), 0x7ffe);
         let before = program.clone();
         assert!(program.edit(20, "END").is_err());
         assert_eq!(program, before);
         assert!(
             program
-                .edit(10, &format!("REM {}", "x".repeat(0x7FF8)))
+                .edit(10, &format!("REM {}", "x".repeat(0x6FF8)))
                 .is_err()
         );
         assert_eq!(program, before);

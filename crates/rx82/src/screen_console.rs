@@ -34,6 +34,9 @@ impl ScreenConsole {
     pub fn reset_cursor(&mut self) {
         self.offset = 0;
     }
+    pub fn set_cursor(&mut self, row: usize, column: usize) {
+        self.offset = (row * 40 + column) * 2;
+    }
     pub fn reveal(&mut self) {
         self.video.borrow_mut().write(0xff30, 0);
     }

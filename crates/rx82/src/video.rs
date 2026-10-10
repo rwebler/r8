@@ -237,8 +237,8 @@ mod tests {
             video.write(0xff3a, x);
         }
         assert_eq!(video.picture[0], 0x1b);
-        assert_eq!(video.pixel_color(0, 0), COLORS[7]);
-        assert_eq!(video.pixel_color(2, 0), COLORS[0]);
+        assert_eq!(video.pixel_color(0, 0), COLORS[6]);
+        assert_eq!(video.pixel_color(2, 0), COLORS[7]);
         assert_eq!(video.pixel_color(4, 0), COLORS[2]);
         video.write(0xff38, 5);
         assert_eq!(video.pixel_color(4, 0), COLORS[5]);
@@ -284,7 +284,7 @@ mod tests {
         bus.mem = true;
         video.tick(&mut bus);
         bus.reconcile();
-        assert_eq!(bus.data, 0x70);
+        assert_eq!(bus.data, 0x67);
         assert_eq!(video.pointer, 2);
     }
     #[test]

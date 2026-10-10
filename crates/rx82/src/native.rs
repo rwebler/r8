@@ -14,9 +14,9 @@ pub const ROM: &[u8] = include_bytes!("../sys/basic_rom.bin");
 /// Entry address of the optional BASIC extension ROM.
 pub const ROM_START: u16 = 0xC100;
 /// Guest recovery and emitter addresses verified against assembly symbols in tests.
-pub const SCREEN_EMIT_START: u16 = 0xECC0;
-pub const SCREEN_EMIT_END: u16 = 0xED99;
-pub const SCREEN_BREAK: u16 = 0xEEE5;
+pub const SCREEN_EMIT_START: u16 = 0xF37E;
+pub const SCREEN_EMIT_END: u16 = 0xF456;
+pub const SCREEN_BREAK: u16 = 0xF5A2;
 
 /// Native BASIC character transport.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,14 +54,6 @@ pub fn machine_with_console(route: ConsoleRoute) -> (System, Rc<RefCell<ConsoleS
         ..System::default()
     };
     sys.devices.insert(0, Box::new(console));
-    sys.devices.insert(
-        0,
-        Box::new(crate::memory::Memory {
-            start: 0xEF00,
-            end: 0xFEFF,
-            data: vec![0; 4096],
-        }),
-    );
     sys.devices
         .insert(1, Box::<crate::files::FilePort>::default());
     sys.install_rom(ROM_START, ROM)
@@ -414,6 +406,24 @@ mod tests {
         let output = String::from_utf8(shared.borrow().output.clone()).unwrap();
         (sys, output)
     }
+
+    #[test]
+    fn expanded_rom_window_is_read_only_in_both_basic_runners() {
+        let expected = ROM[usize::from(0xEF00_u16 - ROM_START)];
+        let commands = "POKE 61184,0\nPRINT PEEK(61184)\nQUIT\n";
+        let (_, native_output) = session(commands);
+        assert!(native_output.contains(&format!("> {expected}\n")));
+        let mut reference = crate::basic::Basic::default();
+        let mut reference_output = Vec::new();
+        reference
+            .interact(&mut commands.as_bytes(), &mut reference_output)
+            .unwrap();
+        assert!(
+            String::from_utf8(reference_output)
+                .unwrap()
+                .contains(&format!("> {expected}\n"))
+        );
+    }
     #[test]
     fn native_binary_transfer_round_trip() {
         let unique = std::time::SystemTime::now()
@@ -472,7 +482,7 @@ mod tests {
         ));
         let upper_name = upper_path.to_string_lossy();
         let (_, output) = session(&format!(
-            "A=99\nPOKE 65279,42\nBLOAD \"{name}\",65279\nPRINT A,PEEK(65279)\nBSAVE \"{name}\",65279,2\nBLOAD \"{name}\",256\n10 GOSUB 100\n20 FOR I=1 TO 2\n30 BLOAD \"{name}\",256\n40 PRINT PEEK(257)\n50 NEXT I\n60 END\n100 IF 1=1 THEN BSAVE \"{name}\",256,2\n110 POKE 256,0\n120 BLOAD \"{name}\",256\n130 POKE 61184,77\n140 BSAVE \"{upper_name}\",61184,1\n150 P=-4352\n155 BLOAD \"{upper_name}\",P+1\n160 PRINT PEEK(61185)\n170 RETURN\nRUN\nQUIT\n"
+            "A=99\nPOKE 256,42\nBLOAD \"{name}\",49151\nPRINT A,PEEK(256)\nBSAVE \"{name}\",49151,2\nBLOAD \"{name}\",256\n10 GOSUB 100\n20 FOR I=1 TO 2\n30 BLOAD \"{name}\",256\n40 PRINT PEEK(257)\n50 NEXT I\n60 END\n100 IF 1=1 THEN BSAVE \"{name}\",256,2\n110 POKE 256,0\n120 BLOAD \"{name}\",256\n130 POKE 258,77\n140 BSAVE \"{upper_name}\",258,1\n150 P=257\n155 BLOAD \"{upper_name}\",P+1\n160 PRINT PEEK(258)\n170 RETURN\nRUN\nQUIT\n"
         ));
         assert!(output.contains("? BINARY RANGE OUTSIDE RAM"), "{output}");
         assert!(output.contains("99\t42"), "{output}");
@@ -495,7 +505,7 @@ mod tests {
         ));
         let name = path.to_string_lossy();
         let (_, output) = session(&format!(
-            "POKE 65279,42\nBSAVE \"{name}\",65279,0\nBLOAD \"{name}\",65279\nBSAVE \"{name}\",65279,-1\nPRINT PEEK(65279)\nQUIT\n"
+            "POKE 256,42\nBSAVE \"{name}\",256,0\nBLOAD \"{name}\",256\nBSAVE \"{name}\",256,-1\nPRINT PEEK(256)\nQUIT\n"
         ));
         assert!(output.contains("? INVALID BINARY LENGTH"), "{output}");
         assert!(output.contains("42\n"), "{output}");
@@ -822,7 +832,7 @@ mod tests {
     #[test]
     fn native_peek_and_poke_access_variables_arrays_strings_and_source() {
         let (sys, output) = session(
-            "10 PRINT 1\nA=4660\nDIM B(1)\nB(1)=1027\nC$=\"cat\"\nPRINT PEEK(768),PEEK(769),PEEK(36866),PEEK(4098),PEEK(4100)\nPOKE 768,120\nPOKE 36866,255\nPOKE 61185,98\nPOKE 4102,2\nPRINT A,B(1),C$\nRUN\nQUIT\n",
+            "10 PRINT 1\nA=4660\nDIM B(1)\nB(1)=1027\nC$=\"cat\"\nPRINT PEEK(768),PEEK(769),PEEK(36866),PEEK(4098),PEEK(4100)\nPOKE 768,120\nPOKE 36866,255\nPOKE 32769,98\nPOKE 4102,2\nPRINT A,B(1),C$\nRUN\nQUIT\n",
         );
         assert!(output.contains("52\t18\t3\t10\t144\n"), "{output}");
         assert!(output.contains("4728\t1279\tbat\n"), "{output}");
@@ -1001,7 +1011,7 @@ mod tests {
             r8asm::assemble(include_str!("../sys/basic_rom.asm")).unwrap(),
             ROM
         );
-        assert!(ROM.len() <= 0x2E00);
+        assert!(ROM.len() <= 0x3E00);
     }
     #[test]
     fn native_long_lines_and_full_window_preserve_chain() {
@@ -1027,7 +1037,7 @@ mod tests {
                 .collect();
             assert_eq!(image, host.program_image());
         }
-        let source = format!("10 REM {}", "x".repeat(0x7FF7));
+        let source = format!("10 REM {}", "x".repeat(0x6FF7));
         let mut host = crate::basic::Basic::default();
         host.load(&source).unwrap();
         let (sys, output) = session_with_budget(&format!("{source}\n20 END\nQUIT\n"), 100_000_000);

@@ -30,7 +30,7 @@ fn stored_string(sys: &mut System, name: u8) -> Vec<u8> {
     if offset == 0 {
         return Vec::new();
     }
-    let address = 0xEEFF_u16.strict_add(offset);
+    let address = 0x7FFF_u16.strict_add(offset);
     let length = sys.peek_mem(address);
     (1..=u16::from(length))
         .map(|index| sys.peek_mem(address.strict_add(index)))

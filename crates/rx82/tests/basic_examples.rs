@@ -81,6 +81,16 @@ fn countdown() {
 }
 
 #[test]
+fn matrix_functions() {
+    check_example(
+        include_str!("../examples/matrix_functions.bas"),
+        "",
+        "12\n1\t122\n",
+        &[(b'C', 4), (b'R', 3)],
+    );
+}
+
+#[test]
 fn squares() {
     check_example(
         include_str!("../examples/squares.bas"),

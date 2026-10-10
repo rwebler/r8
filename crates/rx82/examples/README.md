@@ -29,6 +29,8 @@ otherwise agree.
 | [video_text.bas](video_text.bas) | Raw text VRAM pairs, page retention, serial PRINT | AB appears in the window; captions remain in the terminal |
 | [screen_console.bas](screen_console.bas) | Picture, retained PRINT output, tone, prompt return | Picture and tone during RUN; text appears at END in a live screen session |
 | [video_plot.bas](video_plot.bas) | PLOT loops for an outline and diagonal | White drawing in picture mode |
+| [matrix_functions.bas](matrix_functions.bas) | Two-dimensional `DIM`, `LEN`, and `DEF`/`FN` | Prints 12, then 1 and 122 |
+| [line_at.bas](line_at.bas) | `LINE`, `PRINT AT`, key polling, and palette save/restore | Shows the drawing until `q`, then restores the text colors |
 | [video_upload.bas](video_upload.bas) | Full 3840-byte READ/DATA picture upload with a live string | Checker pattern and a serial caption |
 | [video_file_stream.bas](video_file_stream.bas) | Native file-port streaming into FF33 | Loads [video_picture.bin](video_picture.bin); native mode only |
 | [sound_ports.bas](sound_ports.bas) | Tone, noise, packed volume preservation through PEEK | Tone and noise until Enter is pressed |
@@ -41,6 +43,10 @@ the repository root as its working directory. `vblank_poll.bas` polls the
 running device clock in both interpreters. Headless reference BASIC advances
 1,000 device ticks per statement; harnesses can also call `advance_devices`.
 `BLOAD` accepts RAM targets only and cannot replace the file-port stream.
+`line_at.bas` needs native BASIC's screen console route provided by `--live`.
+It saves the current ink and paper from `FF34`/`FF35` before drawing, then
+returns to `SCREEN 0` and restores them with `COLOR I,P` when `q` is pressed.
+Existing text cells keep their stored color attributes.
 
 All examples use single-letter variable names and signed 16-bit numeric values. Squares fit
 for inputs up to 181; larger inputs eventually overflow. The GCD example accepts
@@ -133,9 +139,9 @@ then `M 0800` and `M 9000`. Array A's descriptor is `00 90 05 00`
 `01 00 02 00 03 00 05 00 07 00 09 00`. Scalar A at `0300` remains zero.
 
 For strings, start `greeting.bas` with `--native --break-before-run`. Enter
-`G`, then `I Ada` and `G` to answer its prompt. `M 0A80` shows G$ as
-`Hello, Ada!` in the ASCII column; `M 0C40` shows N$ as `Ada`. `M 9000`
-shows the four array elements `0, 1, 4, 9` as little-endian words.
+`G`, then `I Ada` and `G` to answer its prompt. `M 8000` shows the stored
+strings in the ASCII column. `M 9000` shows the four array elements
+`0, 1, 4, 9` as little-endian words.
 
 Run `data_table.bas` with `--native --break-before-run`, then enter `G` and
 `M 9000`. The first array words are `0C 00 0F 00 12 00` (12, 15, 18);

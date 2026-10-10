@@ -7,10 +7,10 @@
 ; RAM: 0080 current line, 0082 running, 0084 next line pointer.
 ; 0200 INPUT buffer (256 bytes), 0300 variables (26 little-endian words).
 ; 0800 integer arrays, 0870 string arrays; 0340 scalar string offsets.
-; 0900..0DFF token scratch, 0E00..0FFF string scratch; EF00..FEFF pool.
+; 0900..0DFF token scratch, 0E00..0FFF string scratch; 8000..8FFF pool.
 ; Long lexical items spill from 0200..02FF to A000..A3FF during entry.
 ; 9000..9FFF integer array elements; 00B0 array allocation pointer.
-; 1000..8FFF: packed next word, line word, token stream, zero byte.
+; 1000..7FFF: packed next word, line word, token stream, zero byte.
 ; 0086 holds the final zero pair; stack grows down from BFFF.
     org 0xC100
 BOOT:
@@ -22,7 +22,10 @@ BOOT:
     call PUTS
 PROMPT:
     call SC_PROMPT
-    ld ab, 0xFF00
+    ld a, 0x00
+    ld 0x03C2, a
+    ld 0x03C3, a
+    ld ab, 0x9000
     ld 0x00B6, b
     ld 0x00B7, a
     ld sp, 0xBFFF
@@ -79,6 +82,11 @@ VIDEO_NEXT_COLOR:
     bne VIDEO_NEXT_PLOT
     jmp VIDEO_PLOT
 VIDEO_NEXT_PLOT:
+    ld cd, KW_LINE
+    call MATCH
+    bne VIDEO_NEXT_LINE
+    jmp VIDEO_LINE
+VIDEO_NEXT_LINE:
 VIDEO_DISPATCH_END:
     ld cd, KW_HELP
     call MATCH
@@ -90,6 +98,11 @@ LONG_50:
     bne DIM_DISPATCH_NEXT
     jmp DIM
 DIM_DISPATCH_NEXT:
+    ld cd, KW_DEF
+    call MATCH
+    bne DEF_DISPATCH_NEXT
+    jmp DEF_STATEMENT
+DEF_DISPATCH_NEXT:
     ld cd, KW_DATA
     call MATCH
     bne DISPATCH_READ
@@ -228,6 +241,7 @@ NEW:
     call CLEAR_VARS
     ret
 NEW_PROGRAM:
+    call FN_CLEAR_DIRECTORY
     ld cd, 0x1000
     ld 0x0086, d
     ld 0x0087, c
@@ -301,7 +315,7 @@ EDIT_REPLACE:
     ld gh, cd
     clc
     add gh, ab
-    cmp gh, 0x8FFF
+    cmp gh, 0x7FFF
     bcc EDIT_FITS
     jmp PROGRAM_FULL
 EDIT_FITS:
@@ -392,6 +406,7 @@ EDIT_LINK_LOOP:
     ld cd, gh
     jmp EDIT_LINK_LOOP
 EDIT_DONE:
+    call FN_CLEAR_DIRECTORY
     jmp RESET_DATA
 FIND_NEXT:
     push gh
@@ -450,6 +465,9 @@ LONG_236:
 RUN:
     call EOL
     call CLEAR_VARS
+    ld a, 0x01
+    ld 0x0082, a
+    call FN_BUILD_DIRECTORY
     ld ab, 0x0400
     ld 0x0092, b
     ld 0x0093, a
@@ -556,6 +574,11 @@ LONG_321:
     ld (cd+0x01), a
     ret
 PRINT:
+    ld cd, KW_AT
+    call MATCH
+    bne PRINT_NORMAL
+    jmp PRINT_AT
+PRINT_NORMAL:
     call SPACE
     cmp a, 0x00
     bne LONG_334
@@ -591,6 +614,78 @@ LONG_363:
 PRINT_END:
     call EOL
     jmp NEWLINE
+PRINT_AT:
+    ld cd, 0x00F3
+    ld a, (cd)
+    cmp a, 0x00
+    beq PRINT_AT_SCREEN
+    jmp PRINT_AT_ROUTE_ERROR
+PRINT_AT_SCREEN:
+    call EXPR
+    cmp a, 0x80
+    bcc PRINT_AT_ROW_NONNEGATIVE
+    jmp PRINT_AT_RANGE_ERROR
+PRINT_AT_ROW_NONNEGATIVE:
+    cmp ab, 0x0018
+    bcc PRINT_AT_ROW_VALID
+    jmp PRINT_AT_RANGE_ERROR
+PRINT_AT_ROW_VALID:
+    ld 0x03D0, b
+    ld 0x03D1, a
+    call SPACE
+    cmp a, 0x2C
+    beq PRINT_AT_COMMA
+    jmp EXPECTED_COMMA
+PRINT_AT_COMMA:
+    inc gh
+    call EXPR
+    cmp a, 0x80
+    bcc PRINT_AT_COLUMN_NONNEGATIVE
+    jmp PRINT_AT_RANGE_ERROR
+PRINT_AT_COLUMN_NONNEGATIVE:
+    cmp ab, 0x0028
+    bcc PRINT_AT_COLUMN_VALID
+    jmp PRINT_AT_RANGE_ERROR
+PRINT_AT_COLUMN_VALID:
+    ld 0x03CE, b
+    ld 0x03CF, a
+    call SPACE
+    cmp a, 0x3B
+    beq PRINT_AT_SEMICOLON
+    jmp SYNTAX_ERROR
+PRINT_AT_SEMICOLON:
+    inc gh
+    ld cd, 0x03D0
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld ef, 0x0028
+    call MUL_SIGNED
+    ld ef, 0x03CE
+    ld f, (ef)
+    ld e, (ef+0x01)
+    call ADD_SIGNED
+    shl ab, 0x01
+    ld 0x00F0, b
+    ld 0x00F1, a
+    ld cd, 0x03CE
+    ld a, (cd)
+    ld 0x00F2, a
+    call SPACE
+    cmp a, 0x00
+    beq PRINT_AT_DONE
+    jmp PRINT_NORMAL
+PRINT_AT_DONE:
+    ret
+PRINT_AT_RANGE_ERROR:
+    ld cd, PRINT_AT_RANGE_TEXT
+    jmp REPORT_ERROR
+PRINT_AT_RANGE_TEXT:
+    data "? CURSOR OUT OF RANGE", 0x00
+PRINT_AT_ROUTE_ERROR:
+    ld cd, PRINT_AT_ROUTE_TEXT
+    jmp REPORT_ERROR
+PRINT_AT_ROUTE_TEXT:
+    data "? SCREEN CONSOLE REQUIRED", 0x00
 ; Recursive-descent signed 16-bit expressions. GH is source; AB is result.
 ; CD/EF are preserved by expression functions. R8 stack holds intermediate values.
 EXPR:
@@ -679,7 +774,8 @@ LONG_440:
     jmp VALUE_NEG
 LONG_442:
     cmp a, 0x2B
-    beq VALUE_PLUS
+    bne LONG_444
+    jmp VALUE_PLUS
 LONG_444:
     cmp a, 0xB0
     bne VALUE_NOT_TOKEN
@@ -730,11 +826,43 @@ VALUE_NOT_PEEK:
     bne VALUE_NOT_RND
     jmp RANDOM_NUMBER
 VALUE_NOT_RND:
+    push gh
+    call PEEK
+    cmp a, 0x46
+    bne VALUE_NOT_FN
+    inc gh
+    call PEEK
+    cmp a, 0x4E
+    bne VALUE_NOT_FN
+    inc gh
+    call PEEK
+    cmp a, 0x41
+    bcc VALUE_NOT_FN
+    cmp a, 0x5B
+    bcs VALUE_NOT_FN
+    inc gh
+    call SPACE
+    cmp a, 0x28
+    bne VALUE_NOT_FN
+    pop gh
+    jmp FN_CALL
+VALUE_NOT_FN:
+    pop gh
     call IS_STRING
     beq VALUE_INTEGER
     jmp TYPE_MISMATCH
 VALUE_INTEGER:
     call LOCATION
+    ld ef, 0x03C2
+    ld b, (ef)
+    ld a, (ef+0x01)
+    cmp ab, cd
+    bne VALUE_GLOBAL_INTEGER
+    ld ef, 0x03C4
+    ld b, (ef)
+    ld a, (ef+0x01)
+    ret
+VALUE_GLOBAL_INTEGER:
     ld b, (cd)
     ld a, (cd+0x01)
     ret
@@ -915,8 +1043,7 @@ DIV_LOOP:
     bcc DIV_SHIFT
     sec
     sub ab, ef
-    clc
-    add cd, gh
+    or cd, gh
 DIV_SHIFT:
     ; Descend through at most 16 quotient bits, retaining the remainder in AB.
     lsr ef, 0x01
@@ -1041,8 +1168,7 @@ PRINT_POSITIVE:
     ld cd, 0x000A
     call PRINT_DIGIT
     ld a, f
-    clc
-    add a, 0x30
+    or a, 0x30
     call PUTCHAR
     pop gh
     pop ef
@@ -1069,8 +1195,7 @@ LONG_706:
 DIGIT_EMIT:
     ld gh, 0x0001
     ld a, b
-    clc
-    add a, 0x30
+    or a, 0x30
     call PUTCHAR
     ret
 ; PEEK uppercases ASCII letters but does not modify source or other registers.
@@ -2042,13 +2167,7 @@ BINARY_ARGS:
     ld 0x00D6, a
     cmp ab, 0xC000
     bcc BINARY_MAIN_RAM
-    cmp ab, 0xEF00
-    bcc BINARY_BAD_RANGE
-    cmp ab, 0xFF00
-    bcs BINARY_BAD_RANGE
-    ld a, 0xFF
-    ld 0x00D9, a
-    ret
+    jmp BINARY_BAD_RANGE
 BINARY_MAIN_RAM:
     ld a, 0xC0
     ld 0x00D9, a
@@ -2385,15 +2504,16 @@ HELP:
     jmp PUTS
 HELP_TEXT:
 VIDEO_HELP_START:
-    data "SCREEN 0/1 CLS COLOR ink,paper PLOT x,y", 0x0A
+    data "SCREEN 0/1 CLS COLOR ink,paper PLOT x,y LINE x1,y1,x2,y2", 0x0A
     data "Console output; video/sound: PEEK/POKE", 0x0A
 VIDEO_HELP_END:
     data "Lines: LIST RUN NEW SAVE LOAD QUIT", 0x0A
     data "BSAVE file,address,length; BLOAD file,address", 0x0A
-    data "Binary 0000-BFFF EF00-FEFF", 0x0A
-    data "LET PRINT INPUT IF THEN GOTO GOSUB RETURN FOR NEXT END", 0x0A
+    data "Binary 0000-BFFF", 0x0A
+    data "LET PRINT PRINT AT row,col;items INPUT IF THEN GOTO", 0x0A
+    data "GOSUB RETURN FOR NEXT END DEF FNA(X)=expr", 0x0A
     data "A-Z signed: + - * / ()", 0x0A
-    data "DIM A(100): 0..100; 2048 array elements", 0x0A
+    data "DIM A(2,3): 1..3 dimensions; 2048 max elements", 0x0A
     data "A$..Z$: 255 ASCII; DIM A$(N), +, LEN; 4K pool", 0x0A
     data "DATA; READ A,A(I),A$; RESTORE [line]", 0x0A
     data "PEEK(address), POKE address,byte: memory and devices", 0x0A
@@ -2567,6 +2687,216 @@ BAD_INPUT_CHARACTER_TEXT:
 INPUT_TOO_LONG_TEXT:
     data "? LINE TOO LONG", 0x00
 
+; DEF FNA(X)=expression. The 26 body pointers occupy 0374..03A7.
+DEF_STATEMENT:
+    call REQUIRE_RUN
+    ret
+FN_BUILD_DIRECTORY:
+    call FN_CLEAR_DIRECTORY
+    ld cd, 0x1000
+FN_SCAN_NEXT:
+    ld f, (cd)
+    ld e, (cd+0x01)
+    cmp ef, 0x0000
+    beq FN_SCAN_DONE
+    push ef
+    ld f, (cd+0x02)
+    ld e, (cd+0x03)
+    ld 0x0080, f
+    ld 0x0081, e
+    ld gh, cd
+    clc
+    add gh, 0x0004
+    ld cd, KW_DEF
+    call MATCH
+    bne FN_SCAN_SKIP
+    call FN_PARSE_DEFINITION
+FN_SCAN_SKIP:
+    pop cd
+    jmp FN_SCAN_NEXT
+FN_SCAN_DONE:
+    ret
+FN_CLEAR_DIRECTORY:
+    ld cd, 0x0374
+    ld a, 0x00
+FN_CLEAR_NEXT:
+    ld (cd), a
+    inc cd
+    cmp cd, 0x03A8
+    bne FN_CLEAR_NEXT
+    ret
+FN_PARSE_DEFINITION:
+    call SPACE
+    cmp a, 0x46
+    beq FN_DEF_F
+    jmp FN_BAD_DEFINITION
+FN_DEF_F:
+    inc gh
+    call PEEK
+    cmp a, 0x4E
+    beq FN_DEF_N
+    jmp FN_BAD_DEFINITION
+FN_DEF_N:
+    inc gh
+    call PEEK
+    cmp a, 0x41
+    bcs FN_DEF_NAME_LOWER_OK
+    jmp FN_BAD_DEFINITION
+FN_DEF_NAME_LOWER_OK:
+    cmp a, 0x5B
+    bcc FN_DEF_NAME_OK
+    jmp FN_BAD_DEFINITION
+FN_DEF_NAME_OK:
+    sec
+    sub a, 0x41
+    ld b, a
+    ld a, 0x00
+    shl ab, 0x01
+    clc
+    add ab, 0x0374
+    ld 0x03CC, b
+    ld 0x03CD, a
+    inc gh
+    call SPACE
+    cmp a, 0x28
+    beq FN_DEF_OPEN
+    jmp FN_BAD_DEFINITION
+FN_DEF_OPEN:
+    inc gh
+    call VARIABLE
+    call SPACE
+    cmp a, 0x29
+    beq FN_DEF_CLOSE
+    jmp FN_BAD_DEFINITION
+FN_DEF_CLOSE:
+    inc gh
+    call SPACE
+    cmp a, 0x3D
+    beq FN_DEF_EQUAL
+    jmp FN_BAD_DEFINITION
+FN_DEF_EQUAL:
+    inc gh
+    call SPACE
+    cmp a, 0x00
+    bne FN_DEF_BODY
+    jmp FN_BAD_DEFINITION
+FN_DEF_BODY:
+    ld cd, 0x03CC
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, ef
+    ld f, (cd)
+    ld e, (cd+0x01)
+    cmp ef, 0x0000
+    beq FN_DEF_NEW
+    jmp FN_DUPLICATE
+FN_DEF_NEW:
+    ld cd, 0x03CC
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, ef
+    ld (cd), h
+    ld (cd+0x01), g
+    ret
+FN_CALL:
+    ld cd, gh
+    clc
+    add cd, 0x0002
+    ld a, (cd)
+    sec
+    sub a, 0x41
+    ld b, a
+    ld a, 0x00
+    shl ab, 0x01
+    clc
+    add ab, 0x0374
+    ld cd, ab
+    ld f, (cd)
+    ld e, (cd+0x01)
+    cmp ef, 0x0000
+    bne FN_CALL_DEFINED
+    jmp FN_UNDEFINED
+FN_CALL_DEFINED:
+    push ef
+    clc
+    add gh, 0x0003
+    call SPACE
+    cmp a, 0x28
+    beq FN_CALL_OPEN
+    jmp EXPECTED_LPAREN
+FN_CALL_OPEN:
+    inc gh
+    call IS_STRING
+    beq FN_CALL_NUMERIC
+    jmp TYPE_MISMATCH
+FN_CALL_NUMERIC:
+    call EXPR
+    push ab
+    call SPACE
+    cmp a, 0x29
+    beq FN_CALL_CLOSE
+    jmp EXPECTED_RPAREN
+FN_CALL_CLOSE:
+    inc gh
+    pop ab
+    pop ef
+    ld 0x03C6, b
+    ld 0x03C7, a
+    ld 0x03C8, f
+    ld 0x03C9, e
+    push gh
+    ld cd, 0x03C2
+    ld b, (cd)
+    ld a, (cd+0x01)
+    push ab
+    ld b, (cd+0x02)
+    ld a, (cd+0x03)
+    push ab
+    ld gh, ef
+    sec
+    sub gh, 0x0003
+    call VARIABLE
+    ld 0x03C2, d
+    ld 0x03C3, c
+    ld cd, 0x03C6
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld 0x03C4, b
+    ld 0x03C5, a
+    ld cd, 0x03C8
+    ld h, (cd)
+    ld g, (cd+0x01)
+    call EXPR
+    call EOL
+    ld 0x03CA, b
+    ld 0x03CB, a
+    pop ab
+    ld 0x03C4, b
+    ld 0x03C5, a
+    pop ab
+    ld 0x03C2, b
+    ld 0x03C3, a
+    pop gh
+    ld cd, 0x03CA
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ret
+FN_BAD_DEFINITION:
+    ld cd, FN_BAD_DEFINITION_TEXT
+    jmp REPORT_ERROR
+FN_BAD_DEFINITION_TEXT:
+    data "? BAD DEFINITION", 0x00
+FN_DUPLICATE:
+    ld cd, FN_DUPLICATE_TEXT
+    jmp REPORT_ERROR
+FN_DUPLICATE_TEXT:
+    data "? DUPLICATE FUNCTION", 0x00
+FN_UNDEFINED:
+    ld cd, FN_UNDEFINED_TEXT
+    jmp REPORT_ERROR
+FN_UNDEFINED_TEXT:
+    data "? UNDEFINED FUNCTION", 0x00
+
 ; Arrays: 26 descriptors at 0800..0867 (base word, inclusive upper word).
 ; Elements occupy 9000..9FFF, little endian. 00B0 holds the next free byte.
 CLEAR_ARRAYS:
@@ -2588,8 +2918,7 @@ ARRAY_DESCRIPTOR:
     sec
     sub ab, 0x0300
     shl ab, 0x01
-    clc
-    add ab, 0x0800
+    or ab, 0x0800
     ld cd, ab
     pop ab
     ret
@@ -2611,40 +2940,168 @@ LOCATION_INTEGER:
 LOCATION_ARRAY:
     call ARRAY_DESCRIPTOR
 LOCATION_SUBSCRIPT:
-    push cd
-    inc gh
-    call EXPR
+    ; Save the working words: a subscript expression may itself index an array.
+    ld ef, cd
+    ld cd, 0x03B8
+    ld b, (cd)
+    ld a, (cd+0x01)
     push ab
-    call SPACE
-    cmp a, 0x29
-    beq LOCATION_CLOSE
-    jmp EXPECTED_RPAREN
-LOCATION_CLOSE:
-    inc gh
-    pop ab
-    pop cd
+    ld b, (cd+0x02)
+    ld a, (cd+0x03)
+    push ab
+    ld b, (cd+0x04)
+    ld a, (cd+0x05)
+    push ab
+    ld b, (cd+0x06)
+    ld a, (cd+0x07)
+    push ab
+    ld cd, ef
+    ld 0x03B8, d
+    ld 0x03B9, c
     ld f, (cd)
     ld e, (cd+0x01)
     cmp ef, 0x0000
-    bne LOCATION_DIMENSIONED
+    bne LOCATION_HAVE_BASE
     jmp ARRAY_NOT_DIMENSIONED
-LOCATION_DIMENSIONED:
-    cmp a, 0x80
-    bcc LOCATION_NONNEGATIVE
-    jmp BAD_SUBSCRIPT
-LOCATION_NONNEGATIVE:
-    push ef
-    ld f, (cd+0x02)
-    ld e, (cd+0x03)
-    cmp ab, ef
-    bcc LOCATION_IN_RANGE
-    beq LOCATION_IN_RANGE
-    jmp BAD_SUBSCRIPT
-LOCATION_IN_RANGE:
-    pop ef
+LOCATION_HAVE_BASE:
+    ld a, (cd+0x03)
+    and a, 0x18
+    cmp a, 0x00
+    beq LOCATION_RANK_ONE
+    cmp a, 0x08
+    beq LOCATION_RANK_TWO
+    ld ab, 0x0003
+    jmp LOCATION_RANK_READY
+LOCATION_RANK_TWO:
+    ld ab, 0x0002
+    jmp LOCATION_RANK_READY
+LOCATION_RANK_ONE:
+    ld ab, 0x0001
+LOCATION_RANK_READY:
+    ld 0x03BE, b
+    ld 0x03BF, a
+    cmp ab, 0x0001
+    beq LOCATION_ONE_POINTER
     shl ab, 0x01
+    sec
+    sub ef, ab
+    jmp LOCATION_POINTER_READY
+LOCATION_ONE_POINTER:
+    ld ef, cd
+    clc
+    add ef, 0x0002
+LOCATION_POINTER_READY:
+    ld 0x03BA, f
+    ld 0x03BB, e
+    ld ab, 0x0000
+    ld 0x03BC, b
+    ld 0x03BD, a
+    inc gh
+LOCATION_INDEX:
+    call EXPR
+    push ab
+    call SPACE
+    pop ab
+    cmp a, 0x80
+    bcc LOCATION_INDEX_POSITIVE
+    jmp BAD_SUBSCRIPT
+LOCATION_INDEX_POSITIVE:
+    push ab
+    ld cd, 0x03B8
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld cd, ab
+    ld a, (cd+0x03)
+    and a, 0x18
+    cmp a, 0x00
+    bne LOCATION_MULTI_LENGTH
+    ld cd, 0x03BA
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld cd, ab
+    ld f, (cd)
+    ld e, (cd+0x01)
+    and e, 0x07
+    inc ef
+    jmp LOCATION_LENGTH_READY
+LOCATION_MULTI_LENGTH:
+    ld cd, 0x03BA
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld cd, ab
+    ld f, (cd)
+    ld e, (cd+0x01)
+LOCATION_LENGTH_READY:
+    pop ab
+    cmp ab, ef
+    bcc LOCATION_INDEX_FITS
+    jmp BAD_SUBSCRIPT
+LOCATION_INDEX_FITS:
+    push ab
+    ld cd, 0x03BC
+    ld b, (cd)
+    ld a, (cd+0x01)
+    call MUL_SIGNED
+    pop ef
+    call ADD_SIGNED
+    ld 0x03BC, b
+    ld 0x03BD, a
+    ld cd, 0x03BA
+    ld b, (cd)
+    ld a, (cd+0x01)
+    clc
+    add ab, 0x0002
+    ld (cd), b
+    ld (cd+0x01), a
+    ld cd, 0x03BE
+    ld b, (cd)
+    dec b
+    ld (cd), b
+    call SPACE
+    cmp b, 0x00
+    beq LOCATION_LAST_INDEX
+    cmp a, 0x2C
+    beq LOCATION_MORE_INDEX
+    jmp BAD_SUBSCRIPT
+LOCATION_MORE_INDEX:
+    inc gh
+    jmp LOCATION_INDEX
+LOCATION_LAST_INDEX:
+    cmp a, 0x29
+    beq LOCATION_END_INDEX
+    jmp BAD_SUBSCRIPT
+LOCATION_END_INDEX:
+    inc gh
+    ld cd, 0x03BC
+    ld b, (cd)
+    ld a, (cd+0x01)
+    shl ab, 0x01
+    ld cd, 0x03B8
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, ef
+    ld f, (cd)
+    ld e, (cd+0x01)
     clc
     add ef, ab
+    ld 0x03C0, f
+    ld 0x03C1, e
+    ld cd, 0x03B8
+    pop ab
+    ld (cd+0x06), b
+    ld (cd+0x07), a
+    pop ab
+    ld (cd+0x04), b
+    ld (cd+0x05), a
+    pop ab
+    ld (cd+0x02), b
+    ld (cd+0x03), a
+    pop ab
+    ld (cd), b
+    ld (cd+0x01), a
+    ld cd, 0x03C0
+    ld f, (cd)
+    ld e, (cd+0x01)
     ld cd, ef
     pop ef
     ret
@@ -2661,56 +3118,175 @@ DIM:
 DIM_INTEGER_ARRAY:
     call ARRAY_DESCRIPTOR
 DIM_DESCRIPTOR_READY:
-    push cd
+    ld 0x03B0, d
+    ld 0x03B1, c
     call SPACE
     cmp a, 0x28
     beq DIM_OPEN
     jmp EXPECTED_LPAREN
 DIM_OPEN:
     inc gh
+    ld a, 0x00
+    ld 0x03AE, a
+DIM_NEXT_BOUND:
     call EXPR
+    cmp a, 0x80
+    bcc DIM_NONNEGATIVE
+    jmp BAD_SUBSCRIPT
+DIM_NONNEGATIVE:
+    cmp ab, 0x0800
+    bcc DIM_BOUND_FITS
+    jmp ARRAY_MEMORY_FULL
+DIM_BOUND_FITS:
+    inc ab
     push ab
+    ld cd, 0x03AE
+    ld b, (cd)
+    inc b
+    ld (cd), b
+    ld a, 0x00
+    shl ab, 0x01
+    clc
+    add ab, 0x03A8
+    sec
+    sub ab, 0x0002
+    ld cd, ab
+    pop ab
+    ld (cd), b
+    ld (cd+0x01), a
     call SPACE
+    cmp a, 0x2C
+    bne DIM_END_BOUNDS
+    ld cd, 0x03AE
+    ld a, (cd)
+    cmp a, 0x03
+    bcc DIM_COMMA_OK
+    jmp BAD_SUBSCRIPT
+DIM_COMMA_OK:
+    inc gh
+    jmp DIM_NEXT_BOUND
+DIM_END_BOUNDS:
     cmp a, 0x29
     beq DIM_CLOSE
     jmp EXPECTED_RPAREN
 DIM_CLOSE:
     inc gh
     call EOL
-    pop ab
-    pop cd
-    cmp a, 0x80
-    bcc DIM_NONNEGATIVE
-    jmp BAD_SUBSCRIPT
-DIM_NONNEGATIVE:
+    ld cd, 0x03B0
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, ef
     ld f, (cd)
     ld e, (cd+0x01)
     cmp ef, 0x0000
-    bne ARRAY_ALREADY_DIMENSIONED
+    beq DIM_UNALLOCATED
+    jmp ARRAY_ALREADY_DIMENSIONED
 DIM_UNALLOCATED:
-    cmp ab, 0x0800
-    bcc DIM_SIZE_OK
-    jmp ARRAY_MEMORY_FULL
-DIM_SIZE_OK:
-    push gh
-    push ab
-    inc ab
-    shl ab, 0x01
-    ld gh, 0x00B0
+    ld cd, 0x03AE
+    ld c, (cd)
+    ld ab, 0x0001
+    ld gh, 0x03A8
+DIM_PRODUCT:
     ld f, (gh)
     ld e, (gh+0x01)
-    ld gh, ef
+    call MUL_SIGNED
+    cmp ab, 0x0801
+    bcc DIM_PRODUCT_FITS
+    jmp ARRAY_MEMORY_FULL
+DIM_PRODUCT_FITS:
+    inc gh
+    inc gh
+    dec c
+    bne DIM_PRODUCT
+    ld 0x03B2, b
+    ld 0x03B3, a
+    ld cd, 0x00B0
+    ld h, (cd)
+    ld g, (cd+0x01)
+    ld cd, 0x03AE
+    ld b, (cd)
+    ld a, 0x00
+    cmp ab, 0x0001
+    beq DIM_NO_METADATA
+    shl ab, 0x01
+    jmp DIM_METADATA_SIZE
+DIM_NO_METADATA:
+    ld ab, 0x0000
+DIM_METADATA_SIZE:
+    ld ef, gh
+    clc
+    add ef, ab
+    ld 0x03B4, f
+    ld 0x03B5, e
+    ld cd, 0x03B2
+    ld b, (cd)
+    ld a, (cd+0x01)
+    shl ab, 0x01
     clc
     add ef, ab
     cmp ef, 0xA000
     bcc DIM_FITS
-    bne ARRAY_MEMORY_FULL
+    beq DIM_FITS
+    jmp ARRAY_MEMORY_FULL
 DIM_FITS:
-    pop ab
-    ld (cd), h
-    ld (cd+0x01), g
+    ld 0x03B6, f
+    ld 0x03B7, e
+    ld cd, 0x03B0
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, ef
+    ld ef, 0x03B4
+    ld b, (ef)
+    ld a, (ef+0x01)
+    ld (cd), b
+    ld (cd+0x01), a
+    ld ef, 0x03B2
+    ld b, (ef)
+    ld a, (ef+0x01)
+    dec ab
+    ld ef, 0x03AE
+    ld e, (ef)
+    cmp e, 0x02
+    bne DIM_NOT_TWO
+    or a, 0x08
+DIM_NOT_TWO:
+    cmp e, 0x03
+    bne DIM_RANK_READY
+    or a, 0x10
+DIM_RANK_READY:
     ld (cd+0x02), b
     ld (cd+0x03), a
+    ld cd, 0x00B0
+    ld f, (cd)
+    ld e, (cd+0x01)
+    ld cd, ef
+    ld ef, 0x03A8
+    ld b, 0x03
+    ld a, 0xAE
+    ; Copy dimension lengths only for rank two or three.
+    ld gh, 0x03AE
+    ld b, (gh)
+    cmp b, 0x01
+    beq DIM_CLEAR_ELEMENTS
+DIM_COPY_DIMENSION:
+    ld a, (ef)
+    ld (cd), a
+    inc ef
+    inc cd
+    ld a, (ef)
+    ld (cd), a
+    inc ef
+    inc cd
+    dec b
+    bne DIM_COPY_DIMENSION
+DIM_CLEAR_ELEMENTS:
+    ld gh, 0x03B4
+    ld f, (gh)
+    ld e, (gh+0x01)
+    ld gh, ef
+    ld cd, 0x03B6
+    ld f, (cd)
+    ld e, (cd+0x01)
     ld 0x00B0, f
     ld 0x00B1, e
     ld a, 0x00
@@ -2719,7 +3295,6 @@ DIM_CLEAR:
     inc gh
     cmp gh, ef
     bne DIM_CLEAR
-    pop gh
     ret
 ARRAY_NOT_DIMENSIONED:
     ld cd, ARRAY_NOT_DIMENSIONED_TEXT
@@ -2792,7 +3367,7 @@ IS_STRING_DONE:
     ret
 
 ; Scalars A$..Z$: one-based pool offsets at 0340..0373.
-; Length-prefixed records live in EF00..FEFF. Free records are 0,length.
+; Length-prefixed records live in 8000..8FFF. Free records are 0,length.
 ; 00B2 bump, 00B6 temporary top, 00B8 statement mark, 00C0 dirty.
 CLEAR_STRINGS:
     ld cd, 0x0340
@@ -2803,10 +3378,10 @@ CLEAR_STRING_OFFSET:
     cmp cd, 0x0374
     bne CLEAR_STRING_OFFSET
     ld 0x00C0, a
-    ld ab, 0xEF00
+    ld ab, 0x8000
     ld 0x00B2, b
     ld 0x00B3, a
-    ld ab, 0xFF00
+    ld ab, 0x9000
     ld 0x00B6, b
     ld 0x00B7, a
     ld 0x00B8, b
@@ -2816,7 +3391,7 @@ POOL_BEGIN:
     ld cd, 0x00B6
     ld b, (cd)
     ld a, (cd+0x01)
-    cmp ab, 0xFF00
+    cmp ab, 0x9000
     bne POOL_MARK
     ld cd, 0x00C0
     ld a, (cd)
@@ -2966,8 +3541,7 @@ STRING_VARIABLE_SUFFIX:
     pop cd
     cmp a, 0x28
     beq STRING_ARRAY_LOCATION
-    clc
-    add cd, 0x0040
+    or cd, 0x0040
     ret
 STRING_ARRAY_LOCATION:
     call ARRAY_DESCRIPTOR
@@ -3050,7 +3624,7 @@ STRING_NOT_CHR:
     cmp ab, 0x0000
     beq STRING_EMPTY
     clc
-    add ab, 0xEEFF
+    add ab, 0x7FFF
     ld cd, ab
     jmp STACK_PUSH
 STRING_EMPTY:
@@ -3206,7 +3780,7 @@ POOL_STORE:
     call POOL_ALLOC
     ld ab, cd
     sec
-    sub ab, 0xEEFF
+    sub ab, 0x7FFF
     ld 0x00C2, b
     ld 0x00C3, a
     ld ef, cd
@@ -3236,7 +3810,7 @@ POOL_STORE_COMMIT:
     cmp ab, 0x0000
     beq POOL_STORE_DONE
     clc
-    add ab, 0xEEFF
+    add ab, 0x7FFF
     ld cd, ab
     ld a, (cd)
     ld (cd), 0x00
@@ -3256,7 +3830,7 @@ POOL_ALLOC:
     ld cd, 0x00B2
     ld f, (cd)
     ld e, (cd+0x01)
-    ld cd, 0xEF00
+    ld cd, 0x8000
 POOL_ALLOC_SCAN:
     cmp cd, ef
     beq POOL_ALLOC_BUMP
@@ -3329,8 +3903,8 @@ POOL_COMPACT:
     ld a, (cd+0x01)
     ld 0x00C8, b
     ld 0x00C9, a
-    ld gh, 0xEF00
-    ld ef, 0xEF00
+    ld gh, 0x8000
+    ld ef, 0x8000
 POOL_COMPACT_NEXT:
     ld cd, 0x00C8
     ld b, (cd)
@@ -3355,12 +3929,12 @@ POOL_COMPACT_LIVE:
     push ab
     ld ab, gh
     sec
-    sub ab, 0xEEFF
+    sub ab, 0x7FFF
     ld 0x00C4, b
     ld 0x00C5, a
     ld ab, ef
     sec
-    sub ab, 0xEEFF
+    sub ab, 0x7FFF
     ld 0x00C6, b
     ld 0x00C7, a
     call POOL_REWRITE
@@ -3412,6 +3986,7 @@ POOL_REWRITE_ARRAY:
     push ef
     ld b, (cd+0x02)
     ld a, (cd+0x03)
+    and a, 0x07
     inc ab
     shl ab, 0x01
     clc
@@ -3523,6 +4098,7 @@ LENGTH_ARRAY_END:
 LENGTH_ARRAY_DIMENSIONED:
     ld b, (cd+0x02)
     ld a, (cd+0x03)
+    and a, 0x07
     inc ab
 LENGTH_CLOSE:
     push ab
@@ -4338,6 +4914,10 @@ KW_VAL:
     data 0xA5, "VAL", 0x00
 KW_INSTR:
     data 0xA6, "INSTR", 0x00
+KW_DEF:
+    data 0xB6, "DEF", 0x00
+KW_AT:
+    data 0xB7, "AT", 0x00
 VIDEO_KEYWORDS_START:
 KW_SCREEN:
     data 0xA9, "SCREEN", 0x00
@@ -4347,6 +4927,8 @@ KW_COLOR:
     data 0xAB, "COLOR", 0x00
 KW_PLOT:
     data 0xAC, "PLOT", 0x00
+KW_LINE:
+    data 0xAD, "LINE", 0x00
 VIDEO_KEYWORDS_END:
 TOKEN_TABLE_END:
     data 0x00
@@ -4722,7 +5304,7 @@ TOKEN_SPILL:
     ld ef, gh
     clc
     add ef, 0x0500
-    cmp ef, 0x8FFE
+    cmp ef, 0x7FFE
     bcc TOKEN_SPILL_FITS
     jmp INPUT_TOO_LONG
 TOKEN_SPILL_FITS:
@@ -4738,7 +5320,7 @@ TOKEN_SPILL_COPY:
     ld a, 0x01
     ld 0x00EC, a
 TOKEN_EMIT_STAGED:
-    cmp ef, 0x8FFE
+    cmp ef, 0x7FFE
     bcc TOKEN_EMIT_BYTE
     jmp INPUT_TOO_LONG
 TOKEN_EMIT_BYTE:
@@ -4913,10 +5495,12 @@ DETOKEN_FOUND:
     beq DETOKEN_KEYWORD_SPACE
     cmp b, 0x9E
     beq DETOKEN_KEYWORD_SPACE
+    cmp b, 0xB6
+    beq DETOKEN_KEYWORD_SPACE
 VIDEO_SPACING_START:
     cmp b, 0xA9
     bcc VIDEO_SPACING_END
-    cmp b, 0xAD
+    cmp b, 0xAE
     bcc DETOKEN_KEYWORD_SPACE
 VIDEO_SPACING_END:
     cmp b, 0xA7
@@ -5280,7 +5864,7 @@ REVERSE_BYTES:
 REVERSE_DONE:
     ret
 
-; Capacity prototype, appended to native BASIC by build.py. Not shipped ROM.
+; Video commands in the optional native BASIC ROM.
 ; Reuses EXPR, EOL, BINARY_COMMA, REPORT_ERROR; no new RAM scratch.
 VIDEO_SCREEN:
     ld ef, 0x0002
@@ -5316,13 +5900,164 @@ VIDEO_PLOT:
     ld a, (cd)
     and a, 0x01
     cmp a, 0x01
-    bne VIDEO_ILLEGAL
+    beq VIDEO_PLOT_MODE_OK
+    jmp VIDEO_ILLEGAL
+VIDEO_PLOT_MODE_OK:
     pop ab
     pop cd
     ld 0xFF36, d
     ld 0xFF37, b
     ld a, 0x01
     ld 0xFF3A, a
+    ret
+VIDEO_LINE:
+    ld ef, 0x00A0
+    call VIDEO_ARGUMENT
+    ld 0x03D2, b
+    call BINARY_COMMA
+    ld ef, 0x0060
+    call VIDEO_ARGUMENT
+    ld 0x03D3, b
+    call BINARY_COMMA
+    ld ef, 0x00A0
+    call VIDEO_ARGUMENT
+    ld 0x03D4, b
+    call BINARY_COMMA
+    ld ef, 0x0060
+    call VIDEO_ARGUMENT
+    ld 0x03D5, b
+    call EOL
+    ld cd, 0xFF30
+    ld a, (cd)
+    and a, 0x01
+    cmp a, 0x01
+    beq LINE_MODE_OK
+    jmp VIDEO_ILLEGAL
+LINE_MODE_OK:
+    ld cd, 0x03D4
+    ld b, (cd)
+    ld a, 0x00
+    ld ef, 0x03D2
+    ld f, (ef)
+    ld e, 0x00
+    sec
+    sub ab, ef
+    cmp a, 0x80
+    bcc LINE_DX_POSITIVE
+    call NEGATE
+    ld c, 0xFF
+    jmp LINE_DX_STORE
+LINE_DX_POSITIVE:
+    ld c, 0x01
+LINE_DX_STORE:
+    ld 0x03DC, c
+    ld 0x03D6, b
+    ld 0x03D7, a
+    ld cd, 0x03D5
+    ld b, (cd)
+    ld a, 0x00
+    ld ef, 0x03D3
+    ld f, (ef)
+    ld e, 0x00
+    sec
+    sub ab, ef
+    cmp a, 0x80
+    bcc LINE_DY_POSITIVE
+    call NEGATE
+    ld c, 0xFF
+    jmp LINE_DY_STORE
+LINE_DY_POSITIVE:
+    ld c, 0x01
+LINE_DY_STORE:
+    ld 0x03DD, c
+    ld 0x03D8, b
+    ld 0x03D9, a
+    ld ef, ab
+    ld cd, 0x03D6
+    ld b, (cd)
+    ld a, (cd+0x01)
+    sec
+    sub ab, ef
+    ld 0x03DA, b
+    ld 0x03DB, a
+LINE_DRAW:
+    ld cd, 0x03D2
+    ld b, (cd)
+    ld 0xFF36, b
+    ld b, (cd+0x01)
+    ld 0xFF37, b
+    ld b, 0x01
+    ld 0xFF3A, b
+    ld b, (cd)
+    ld a, (cd+0x02)
+    cmp b, a
+    bne LINE_CONTINUE
+    ld b, (cd+0x01)
+    ld a, (cd+0x03)
+    cmp b, a
+    bne LINE_CONTINUE
+    jmp LINE_DONE
+LINE_CONTINUE:
+    ld cd, 0x03DA
+    ld b, (cd)
+    ld a, (cd+0x01)
+    shl ab, 0x01
+    ld 0x03DE, b
+    ld 0x03DF, a
+    ld cd, 0x03D8
+    ld f, (cd)
+    ld e, (cd+0x01)
+    call ADD_SIGNED
+    cmp ab, 0x0000
+    beq LINE_NO_X
+    cmp a, 0x80
+    bcs LINE_NO_X
+    ld cd, 0x03DA
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld ef, 0x03D8
+    ld f, (ef)
+    ld e, (ef+0x01)
+    call SUB_SIGNED
+    ld (cd), b
+    ld (cd+0x01), a
+    ld cd, 0x03D2
+    ld a, (cd)
+    ld ef, 0x03DC
+    ld b, (ef)
+    clc
+    add a, b
+    ld (cd), a
+LINE_NO_X:
+    ld cd, 0x03DE
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld ef, 0x03D6
+    ld f, (ef)
+    ld e, (ef+0x01)
+    call SUB_SIGNED
+    cmp a, 0x80
+    bcs LINE_DO_Y
+    jmp LINE_DRAW
+LINE_DO_Y:
+    ld cd, 0x03DA
+    ld b, (cd)
+    ld a, (cd+0x01)
+    ld ef, 0x03D6
+    ld f, (ef)
+    ld e, (ef+0x01)
+    call ADD_SIGNED
+    ld (cd), b
+    ld (cd+0x01), a
+    ld cd, 0x03D3
+    ld a, (cd)
+    ld ef, 0x03DD
+    ld b, (ef)
+    clc
+    add a, b
+    ld (cd), a
+    jmp LINE_DRAW
+LINE_DONE:
     ret
 VIDEO_ARGUMENT:
     call EXPR
@@ -5360,8 +6095,7 @@ VIDEO_CLS_TEXT:
     ld b, a
     dec cd
     ld a, (cd)
-    clc
-    add a, b
+    or a, b
     ld b, a
     ld ef, 0x03C0
 VIDEO_CLS_TEXT_LOOP:
@@ -5425,8 +6159,7 @@ SC_SCREEN:
     shl b, 0x04
     dec cd
     ld h, (cd)
-    clc
-    add b, h
+    or b, h
     ld cd, 0x00F2
     ld h, (cd)
     cmp a, 0x0D
