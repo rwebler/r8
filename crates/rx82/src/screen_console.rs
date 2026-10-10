@@ -115,7 +115,7 @@ mod tests {
         let video = video.borrow();
         assert_eq!(video.mode, 1);
         assert_eq!(video.picture[0], 0x40);
-        assert_eq!(&video.text[..2], &[b'X', 0x70]);
+        assert_eq!(&video.text[..2], &[b'X', 0x67]);
         assert_eq!(
             &video.text[TEXT_BYTES - 160..TEXT_BYTES - 158],
             &[b'Y', 0x42]

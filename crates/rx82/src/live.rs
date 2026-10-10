@@ -188,7 +188,7 @@ mod tests {
         let mut bytes = [0_u8; 8];
         let count = reader.read(&mut bytes).unwrap();
         assert_eq!(&bytes[..count], b"AC\n");
-        assert_eq!(&basic.video.borrow().text[..4], &[b'A', 0x70, b'C', 0x70]);
+        assert_eq!(&basic.video.borrow().text[..4], &[b'A', 0x67, b'C', 0x67]);
         assert!(!screen.borrow().cursor_visible);
     }
     #[test]

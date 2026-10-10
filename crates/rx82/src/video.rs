@@ -35,15 +35,15 @@ impl Default for Video {
     fn default() -> Self {
         let mut text = [0; TEXT_BYTES];
         for cell in text.chunks_exact_mut(2) {
-            cell.copy_from_slice(&[0x20, 0x70]);
+            cell.copy_from_slice(&[0x20, 0x67]);
         }
         Self {
             text,
             picture: [0; PICTURE_BYTES],
             mode: 0,
             pointer: 0,
-            ink: 0,
-            paper: 7,
+            ink: 7,
+            paper: 6,
             x: 0,
             y: 0,
             slot2: 2,
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn retained_pages_pointer_and_packed_pixels() {
         let mut video = Video::default();
-        assert_eq!(&video.text[..4], &[0x20, 0x70, 0x20, 0x70]);
+        assert_eq!(&video.text[..4], &[0x20, 0x67, 0x20, 0x67]);
         video.write(0xff33, b'A');
         video.write(0xff33, 0x70);
         assert_eq!(video.text[0], b'A');
