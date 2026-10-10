@@ -58,11 +58,12 @@ Cell `(x,y)` occupies bytes `2*(40*y+x)` and the following byte, character then
 attribute. Attribute low nibble is ink and high nibble is paper. Page size is
 1920 bytes, offsets 0000–077F. Existing cell colors do not change with COLOR.
 
-ASCII 20–7E uses an 8-by-8 controller font. Use an original or suitably licensed
-font asset with its license recorded; the exact ASCII artwork is an asset
-choice, not a software-visible register behavior. Unsupported character codes
-render blank, including 7F and A0–FF. Stored VRAM bytes are never rewritten by
-the renderer. BASIC PRINT's control handling is specified separately below.
+ASCII 20–7E uses the 8-by-8 `horizontal_MSB_1` bitmap font from
+`basti79/LCD-fonts`; provenance is recorded in
+`crates/rx82/src/video-font-attribution.txt`. The leftmost pixel is bit 7.
+Unsupported character codes render blank, including 7F and A0–FF. Stored VRAM
+bytes are never rewritten by the renderer. BASIC PRINT's control handling is
+specified separately below.
 
 The block set 80–9F is fixed by these bitmap rules (row byte bit 7 is leftmost):
 
