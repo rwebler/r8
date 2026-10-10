@@ -442,8 +442,9 @@ retained across `SCREEN` changes. `CLS` fills the active text page with spaces
 and the current paper/ink attribute, or the picture page with slot zero.
 `PLOT` writes palette slot 1 at the selected coordinate. `COLOR` changes ink
 and paper registers; it does not rewrite existing text attributes or picture
-bytes. The ASCII font was rasterized from Liberation Mono; its license is
-[recorded here](src/video-font-license.txt).
+bytes. Printable ASCII uses the 8×8 `horizontal_MSB_1` bitmap font from
+[basti79/LCD-fonts](https://github.com/basti79/LCD-fonts); source details and
+attribution are recorded in [video-font-attribution.txt](src/video-font-attribution.txt).
 
 Text starts with blue paper (palette index 6) and yellow ink (palette index 7).
 To set and display those colors explicitly from BASIC:
