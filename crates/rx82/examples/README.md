@@ -18,6 +18,7 @@ otherwise agree.
 | [sort.bas](sort.bas) | `DATA`/`READ`, `DIM`, indexed assignment, nested loops, `GOSUB` | Sorts six integers into 1, 2, 3, 5, 7, 9 |
 | [data_table.bas](data_table.bas) | Mixed string/integer `DATA`, array `READ`, `RESTORE` | Loads 12 values, reports total 243 and target 240 |
 | [memory.bas](memory.bas) | `POKE`, `PEEK`, computed addresses | Writes squares 0–49 to bytes 256–263 and reads them back |
+| [savegame.bas](savegame.bas) | `DATA`/`READ`, `BSAVE`/`BLOAD`, `PEEK`/`POKE` | Saves two game values to a raw file, reloads them into variables, then updates the save |
 | [dice.bas](dice.bas) | Optional random device, `RANDOMIZE`, `RND` | Ten die rolls, each from 1 to 6; requires `--random-device` |
 | [rooms.bas](rooms.bas) | String arrays, reassignment, compaction | Prints `Entrance` and `Garden` |
 | [greeting.bas](greeting.bas) | String `INPUT`, concatenation, comparison, `LEN` for strings and arrays | Input Ada produces `Hello, Ada!`, length 11, 4 array elements, last square 9 |
@@ -151,3 +152,18 @@ all twelve values came from the two numeric DATA lines. `I RESTORE 310`, `G`,
 For `memory.bas`, run with `--native --break-before-run`, enter `G`, then
 `M 0100`. The first eight bytes should be `00 01 04 09 10 19 24 31`.
 This example also works in reference mode, using its separate byte memory.
+
+## Savegame example
+
+Run `savegame.bas` from the repository root with either interpreter:
+
+```sh
+cargo run -p rx82 -- basic crates/rx82/examples/savegame.bas
+cargo run -p rx82 -- basic --native crates/rx82/examples/savegame.bas
+```
+
+The program seeds a two-byte save with lives and level values, writes it to
+`savegame.dat`, then loads those bytes back into memory and uses `PEEK` to
+initialize the BASIC variables. It advances the values and saves them again.
+The example uses decimal addresses 256–257 (`0100`–`0101` hex); the generated
+`savegame.dat` is written in the process's current directory.
