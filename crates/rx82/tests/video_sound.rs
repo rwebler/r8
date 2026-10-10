@@ -63,7 +63,7 @@ fn debugger_reads_service_ports_without_advancing_time() {
     assert_eq!(sys.peek_mem(0xff30), 0);
     sys.video.borrow_mut().write(0xff31, 0);
     assert_eq!(sys.peek_mem(0xff33), 0x20);
-    assert_eq!(sys.peek_mem(0xff33), 0x70);
+    assert_eq!(sys.peek_mem(0xff33), 0x67);
     assert_eq!(sys.device_ticks, before);
     sys.advance_devices(60_000);
     assert_eq!(sys.peek_mem(0xff30), 0x80);

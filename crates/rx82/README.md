@@ -445,6 +445,16 @@ and paper registers; it does not rewrite existing text attributes or picture
 bytes. The ASCII font was rasterized from Liberation Mono; its license is
 [recorded here](src/video-font-license.txt).
 
+Text starts with blue paper (palette index 6) and yellow ink (palette index 7).
+To set and display those colors explicitly from BASIC:
+
+```basic
+POKE 65332,7
+POKE 65333,6
+CLS
+PRINT "YELLOW ON BLUE"
+```
+
 | Address | Video register |
 | :--- | :--- |
 | FF30 | Mode bit 0 and read-only vblank bit 7 |
